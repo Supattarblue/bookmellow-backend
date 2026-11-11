@@ -136,11 +136,14 @@ func run() error {
 	mux.Handle("DELETE /api/reviews/{id}",
 		mw.RequireLogin(issuer, http.HandlerFunc(h.DeleteReview)),
 	)
+
 	// Votes
-	mux.HandleFunc("GET /api/books/{id}/vote", h.GetBookVote)
+	mux.Handle("GET /api/books/{id}/vote",
+		mw.OptionalLogin(issuer, http.HandlerFunc(h.GetBookVote)),
+	)
 	mux.Handle("PUT /api/books/{id}/vote",
-    mw.RequireLogin(issuer, http.HandlerFunc(h.SaveBookVote)),
-)
+		mw.RequireLogin(issuer, http.HandlerFunc(h.SaveBookVote)),
+	)
 
 	// Admin middleware
 	adminOnly := func(next http.Handler) http.Handler {

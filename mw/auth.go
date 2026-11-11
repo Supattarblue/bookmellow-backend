@@ -1,4 +1,3 @@
-
 package mw
 
 import (
@@ -43,6 +42,27 @@ func RequireLogin(issuer *auth.Issuer, next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), userClaimsKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// OptionalLogin allows both guests and logged-in members.
+func OptionalLogin(issuer *auth.Issuer, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		parts := strings.SplitN(header, " ", 2)
+
+		if len(parts) == 2 &&
+			strings.EqualFold(parts[0], "Bearer") &&
+			strings.TrimSpace(parts[1]) != "" {
+
+			claims, err := issuer.Parse(strings.TrimSpace(parts[1]))
+			if err == nil {
+				ctx := context.WithValue(r.Context(), userClaimsKey, claims)
+				r = r.WithContext(ctx)
+			}
+		}
+
+		next.ServeHTTP(w, r)
 	})
 }
 
