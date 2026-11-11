@@ -80,3 +80,27 @@ CREATE INDEX IF NOT EXISTS idx_favorites_book_id
 
 CREATE INDEX IF NOT EXISTS idx_user_preferences_category
     ON user_preferences(category_id);
+
+
+
+CREATE TABLE IF NOT EXISTS votes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    user_id UUID NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE,
+
+    book_id UUID NOT NULL
+        REFERENCES books(id) ON DELETE CASCADE,
+
+    rating INTEGER NOT NULL
+        CHECK (rating BETWEEN 1 AND 5),
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE (user_id, book_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_votes_book_id
+ON votes(book_id);
