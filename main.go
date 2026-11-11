@@ -62,7 +62,10 @@ func run() error {
 
 	st := store.New(db)
 	issuer := auth.NewIssuer(jwtSecret)
-	h := handler.New(st, issuer)
+
+	googleBooksAPIKey := os.Getenv("GOOGLE_BOOKS_API_KEY")
+
+	h := handler.New(st, issuer, googleBooksAPIKey)
 
 	mux := http.NewServeMux()
 
@@ -154,9 +157,6 @@ func run() error {
 	mux.Handle("GET /api/admin/members/{id}",
 		adminOnly(http.HandlerFunc(h.AdminGetMember)),
 	)
-	mux.Handle("PUT /api/admin/members/{id}",
-		adminOnly(http.HandlerFunc(h.AdminUpdateMember)),
-	)
 	mux.Handle("PUT /api/admin/members/{id}/role",
 		adminOnly(http.HandlerFunc(h.AdminSetMemberRole)),
 	)
@@ -179,6 +179,11 @@ func run() error {
 	)
 	mux.Handle("DELETE /api/admin/books/{id}",
 		adminOnly(http.HandlerFunc(h.AdminDeleteBook)),
+	)
+
+	// Admin Google Books search
+	mux.Handle("GET /api/admin/external-books",
+		adminOnly(http.HandlerFunc(h.AdminSearchGoogleBooks)),
 	)
 
 	// Middleware

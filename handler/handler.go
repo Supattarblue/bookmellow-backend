@@ -1,4 +1,3 @@
-
 package handler
 
 import (
@@ -12,14 +11,16 @@ import (
 )
 
 type Handler struct {
-	Store   *store.Store
-	Tickets *auth.Issuer
+	Store             *store.Store
+	Tickets           *auth.Issuer
+	GoogleBooksAPIKey string
 }
 
-func New(s *store.Store, issuer *auth.Issuer) *Handler {
+func New(s *store.Store, issuer *auth.Issuer, googleBooksAPIKey string) *Handler {
 	return &Handler{
-		Store:   s,
-		Tickets: issuer,
+		Store:             s,
+		Tickets:           issuer,
+		GoogleBooksAPIKey: googleBooksAPIKey,
 	}
 }
 

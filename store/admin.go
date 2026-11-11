@@ -233,6 +233,36 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 		}
 	}
 
+	book.Categories = make([]string, 0, len(categoryIDs))
+
+	rows, err := tx.Query(ctx, `
+		SELECT c.name
+		FROM categories c
+		JOIN book_categories bc ON bc.category_id = c.id
+		WHERE bc.book_id = $1
+		ORDER BY c.name
+	`, book.ID)
+	if err != nil {
+		return err
+	}
+
+	for rows.Next() {
+		var categoryName string
+
+		if err := rows.Scan(&categoryName); err != nil {
+			rows.Close()
+			return err
+		}
+
+		book.Categories = append(book.Categories, categoryName)
+	}
+
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+
 	return tx.Commit(ctx)
 }
 
@@ -280,6 +310,36 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 		if err != nil {
 			return err
 		}
+	}
+
+	book.Categories = make([]string, 0, len(categoryIDs))
+
+	rows, err := tx.Query(ctx, `
+		SELECT c.name
+		FROM categories c
+		JOIN book_categories bc ON bc.category_id = c.id
+		WHERE bc.book_id = $1
+		ORDER BY c.name
+	`, book.ID)
+	if err != nil {
+		return err
+	}
+
+	for rows.Next() {
+		var categoryName string
+
+		if err := rows.Scan(&categoryName); err != nil {
+			rows.Close()
+			return err
+		}
+
+		book.Categories = append(book.Categories, categoryName)
+	}
+
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
 	}
 
 	return tx.Commit(ctx)

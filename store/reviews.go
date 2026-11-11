@@ -1,4 +1,3 @@
-
 package store
 
 import (
@@ -85,6 +84,15 @@ func (s *Store) CreateReview(ctx context.Context, userID, bookID string, rating 
 		return nil, err
 	}
 
+	err = s.DB.QueryRow(ctx, `
+		SELECT username
+		FROM users
+		WHERE id = $1
+	`, review.UserID).Scan(&review.Username)
+	if err != nil {
+		return nil, err
+	}
+
 	return &review, nil
 }
 
@@ -92,14 +100,18 @@ func (s *Store) UpdateReview(ctx context.Context, reviewID, userID string, ratin
 	var review Review
 
 	err := s.DB.QueryRow(ctx, `
-		UPDATE reviews
+		UPDATE reviews r
 		SET rating = $1, comment = $2, updated_at = NOW()
-		WHERE id = $3 AND user_id = $4
-		RETURNING id, user_id, book_id, rating,
-			COALESCE(comment, ''), created_at::text, updated_at::text
+		FROM users u
+		WHERE r.id = $3
+			AND r.user_id = $4
+			AND u.id = r.user_id
+		RETURNING r.id, r.user_id, u.username, r.book_id, r.rating,
+			COALESCE(r.comment, ''), r.created_at::text, r.updated_at::text
 	`, rating, comment, reviewID, userID).Scan(
 		&review.ID,
 		&review.UserID,
+		&review.Username,
 		&review.BookID,
 		&review.Rating,
 		&review.Comment,
