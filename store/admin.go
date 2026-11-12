@@ -1,4 +1,3 @@
-
 package store
 
 import (
@@ -26,7 +25,7 @@ func (s *Store) AdminDashboard(ctx context.Context) (*AdminStats, error) {
 			(
 				SELECT COUNT(*)
 				FROM books b
-				JOIN book_catalog_visibility v
+				INNER JOIN book_catalog_visibility v
 					ON v.book_id = b.id
 				WHERE v.is_visible = TRUE
 			),
@@ -176,6 +175,16 @@ func (s *Store) AdminDeleteMember(ctx context.Context, id string) error {
 }
 
 func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []string) error {
+	book.Title = strings.TrimSpace(book.Title)
+	book.Author = strings.TrimSpace(book.Author)
+
+	if book.Title == "" || book.Author == "" {
+		return errors.New("book title and author are required")
+	}
+	if !hasThaiScript(book.Title) {
+		return errors.New("only Thai-language book titles are allowed")
+	}
+
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
@@ -256,6 +265,16 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 }
 
 func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []string) error {
+	book.Title = strings.TrimSpace(book.Title)
+	book.Author = strings.TrimSpace(book.Author)
+
+	if book.Title == "" || book.Author == "" {
+		return errors.New("book title and author are required")
+	}
+	if !hasThaiScript(book.Title) {
+		return errors.New("only Thai-language book titles are allowed")
+	}
+
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
@@ -388,7 +407,7 @@ func (s *Store) AdminBulkCreateBooks(
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
 
-		if book.Title == "" || book.Author == "" {
+		if book.Title == "" || book.Author == "" || !hasThaiScript(book.Title) {
 			skipped++
 			continue
 		}
@@ -545,20 +564,8 @@ func (s *Store) AdminBulkImportBooksDetailed(
 			continue
 		}
 
-		switch book.Language {
-		case "th":
-			if !hasThaiScript(book.Title) {
-				stats.SkippedNotThai++
-				skipped++
-				continue
-			}
-		case "en":
-			if !hasLatinScript(book.Title) {
-				stats.SkippedNotThai++
-				skipped++
-				continue
-			}
-		default:
+		// อนุญาตเฉพาะหนังสือภาษาไทย
+		if book.Language != "th" || !hasThaiScript(book.Title) {
 			stats.SkippedNotThai++
 			skipped++
 			continue
@@ -696,15 +703,6 @@ func (s *Store) AdminReplaceNonThaiBooks(
 func hasThaiScript(value string) bool {
 	for _, r := range value {
 		if r >= '\u0E00' && r <= '\u0E7F' {
-			return true
-		}
-	}
-	return false
-}
-
-func hasLatinScript(value string) bool {
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
 			return true
 		}
 	}
