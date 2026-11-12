@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -462,13 +463,7 @@ func (s *Store) AdminBulkCreateBooks(
 		}
 
 		err = tx.QueryRow(ctx, `
-			INSERT INTO books (
-				title,
-				author,
-				description,
-				cover_url,
-				published_year
-			)
+			INSERT INTO books (title, author, description, cover_url, published_year)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id
 		`,
@@ -478,7 +473,6 @@ func (s *Store) AdminBulkCreateBooks(
 			book.CoverURL,
 			book.PublishedYear,
 		).Scan(&book.ID)
-
 		if err != nil {
 			return 0, 0, err
 		}
@@ -488,7 +482,6 @@ func (s *Store) AdminBulkCreateBooks(
 				INSERT INTO book_categories (book_id, category_id)
 				VALUES ($1, $2)
 			`, book.ID, categoryID)
-
 			if err != nil {
 				return 0, 0, err
 			}
@@ -516,8 +509,19 @@ type BulkImportBook struct {
 	Language      string
 }
 
-// AdminBulkImportBooks imports books while preserving existing records
-// and enforcing a maximum catalog size of 100 books.
+// containsThai checks whether a string contains Thai characters.
+func containsThai(value string) bool {
+	for _, r := range value {
+		if unicode.In(r, unicode.Thai) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// AdminBulkImportBooks imports Thai-language books while preserving
+// existing records and enforcing a maximum catalog size of 100 books.
 func (s *Store) AdminBulkImportBooks(
 	ctx context.Context,
 	books []BulkImportBook,
@@ -557,11 +561,14 @@ func (s *Store) AdminBulkImportBooks(
 		book.Author = strings.TrimSpace(book.Author)
 		book.Description = strings.TrimSpace(book.Description)
 		book.CoverURL = strings.TrimSpace(book.CoverURL)
+		book.Language = strings.ToLower(strings.TrimSpace(book.Language))
 
 		if book.Title == "" ||
 			book.Author == "" ||
 			book.Description == "" ||
-			book.CoverURL == "" {
+			book.CoverURL == "" ||
+			book.Language != "th" ||
+			(!containsThai(book.Title) && !containsThai(book.Description)) {
 			skipped++
 			continue
 		}
@@ -594,6 +601,44 @@ func (s *Store) AdminBulkImportBooks(
 			continue
 		}
 
+		// Resolve valid category IDs before inserting the book.
+		categoryIDs := make([]string, 0, len(book.Categories))
+		seenCategoryIDs := make(map[string]bool)
+
+		for _, categoryName := range book.Categories {
+			categoryName = strings.TrimSpace(categoryName)
+			if categoryName == "" {
+				continue
+			}
+
+			var categoryID string
+
+			err = tx.QueryRow(ctx, `
+				SELECT id
+				FROM categories
+				WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
+				LIMIT 1
+			`, categoryName).Scan(&categoryID)
+
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					continue
+				}
+				return 0, 0, 0, err
+			}
+
+			if !seenCategoryIDs[categoryID] {
+				categoryIDs = append(categoryIDs, categoryID)
+				seenCategoryIDs[categoryID] = true
+			}
+		}
+
+		// Do not insert a book without a valid category.
+		if len(categoryIDs) == 0 {
+			skipped++
+			continue
+		}
+
 		var bookID string
 
 		err = tx.QueryRow(ctx, `
@@ -618,29 +663,7 @@ func (s *Store) AdminBulkImportBooks(
 			return 0, 0, 0, err
 		}
 
-		for _, categoryName := range book.Categories {
-			categoryName = strings.TrimSpace(categoryName)
-
-			if categoryName == "" {
-				continue
-			}
-
-			var categoryID string
-
-			err = tx.QueryRow(ctx, `
-				SELECT id
-				FROM categories
-				WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
-				LIMIT 1
-			`, categoryName).Scan(&categoryID)
-
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					continue
-				}
-				return 0, 0, 0, err
-			}
-
+		for _, categoryID := range categoryIDs {
 			_, err = tx.Exec(ctx, `
 				INSERT INTO book_categories (book_id, category_id)
 				VALUES ($1, $2)
