@@ -17,6 +17,9 @@ import (
 const (
 	googleBooksURL = "https://www.googleapis.com/books/v1/volumes"
 	bookTarget     = 100
+	importPages    = 3
+	importPageSize = 40
+	importTimeout  = 70 * time.Second
 )
 
 type GoogleBooksResponse struct {
@@ -157,6 +160,14 @@ func hasThaiText(value string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeBookText(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
+func makeBookDuplicateKey(title, author string) string {
+	return normalizeBookText(title) + "|" + normalizeBookText(author)
 }
 
 func isLowQualityDiscoverBook(result GoogleBookResult) bool {
@@ -385,48 +396,64 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 
 	plans := []bulkSearchPlan{
 		{
-			Query:   "หนังสือพัฒนาตนเอง จิตวิทยา พลังบวก ความสุข",
-			Subject: "Self-Help", Kind: "self-help",
-			Categories: []string{"Self-Help"}, Target: 15,
+			Query:      "หนังสือพัฒนาตนเอง จิตวิทยา พลังบวก ความสุข",
+			Subject:    "Self-Help",
+			Kind:       "self-help",
+			Categories: []string{"Self-Help"},
+			Target:     15,
 		},
 		{
-			Query:   "มังงะ การ์ตูนญี่ปุ่น ไคจูหมายเลข 8",
-			Subject: "Comics & Graphic Novels", Kind: "manga",
-			Categories: []string{"Adventure"}, Target: 15,
+			Query:      "มังงะ การ์ตูนญี่ปุ่น ไคจูหมายเลข 8",
+			Subject:    "Comics & Graphic Novels",
+			Kind:       "manga",
+			Categories: []string{"Adventure"},
+			Target:     15,
 		},
 		{
-			Query:   "หนังสือเรียนภาษาอังกฤษ คำศัพท์ ไวยากรณ์",
-			Subject: "Foreign Language Study", Kind: "english",
-			Categories: []string{"Education"}, Target: 12,
+			Query:      "หนังสือเรียนภาษาอังกฤษ คำศัพท์ ไวยากรณ์",
+			Subject:    "Foreign Language Study",
+			Kind:       "english",
+			Categories: []string{"Education"},
+			Target:     12,
 		},
 		{
-			Query:   "นิยายแฟนตาซี เวทมนตร์ พ่อมด แฮร์รี่ พอตเตอร์",
-			Subject: "Fantasy", Kind: "fantasy",
-			Categories: []string{"Fantasy"}, Target: 13,
+			Query:      "นิยายแฟนตาซี เวทมนตร์ พ่อมด แฮร์รี่ พอตเตอร์",
+			Subject:    "Fantasy",
+			Kind:       "fantasy",
+			Categories: []string{"Fantasy"},
+			Target:     13,
 		},
 		{
-			Query:   "นิยายสืบสวนสอบสวน นักสืบ ปริศนาฆาตกรรม",
-			Subject: "Mystery", Kind: "mystery",
-			Categories: []string{"Mystery", "Thriller"}, Target: 18,
+			Query:      "นิยายสืบสวนสอบสวน นักสืบ ปริศนาฆาตกรรม",
+			Subject:    "Mystery",
+			Kind:       "mystery",
+			Categories: []string{"Mystery", "Thriller"},
+			Target:     18,
 		},
 		{
-			Query:   "หนังสือแต่งบ้าน จัดบ้าน ตกแต่งภายใน ไลฟ์สไตล์",
-			Subject: "House & Home", Kind: "lifestyle",
-			Categories: []string{"Business"}, Target: 10,
+			Query:      "หนังสือแต่งบ้าน จัดบ้าน ตกแต่งภายใน ไลฟ์สไตล์",
+			Subject:    "House & Home",
+			Kind:       "lifestyle",
+			Categories: []string{"Business"},
+			Target:     10,
 		},
 		{
-			Query:   "นิยายรักโรแมนติก ความรัก",
-			Subject: "Romance", Kind: "romance",
-			Categories: []string{"Romance"}, Target: 12,
+			Query:      "นิยายรักโรแมนติก ความรัก",
+			Subject:    "Romance",
+			Kind:       "romance",
+			Categories: []string{"Romance"},
+			Target:     12,
 		},
 		{
-			Query:   "นิยายสยองขวัญ เรื่องผี หลอน",
-			Subject: "Fiction", Kind: "horror",
-			Categories: []string{"Horror"}, Target: 5,
+			Query:      "นิยายสยองขวัญ เรื่องผี หลอน",
+			Subject:    "Fiction",
+			Kind:       "horror",
+			Categories: []string{"Horror"},
+			Target:     5,
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 70*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), importTimeout)
 	defer cancel()
 
 	resultsByPlan := make([][]GoogleBookResult, len(plans))
@@ -462,11 +489,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 
-	if ctx.Err() != nil {
-		writeError(w, http.StatusGatewayTimeout, "Google Books search timed out")
-		return
-	}
-
 	successfulSearches := 0
 	for _, searchErr := range errorsByPlan {
 		if searchErr == nil {
@@ -475,12 +497,21 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if successfulSearches == 0 {
+		if ctx.Err() != nil {
+			writeError(w, http.StatusGatewayTimeout, "Google Books search timed out")
+			return
+		}
+
 		writeError(w, http.StatusBadGateway, "All Google Books searches failed")
 		return
 	}
 
-	seen := make(map[string]bool)
-	importBooks := make([]store.BulkImportBook, 0, bookTarget)
+	// รับตัวเลือกมากกว่าเป้าหมายต่อหมวด เพื่อให้ Store
+	// มีตัวเลือกทดแทนเมื่อพบหนังสือที่ซ้ำในฐานข้อมูล
+	seenIDs := make(map[string]bool)
+	seenBooks := make(map[string]bool)
+
+	importBooks := make([]store.BulkImportBook, 0, bookTarget*4)
 	candidateCounts := make([]int, len(plans))
 	rejectedByRelevance := 0
 
@@ -489,8 +520,11 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// สำรองตัวเลือกต่อหมวด 8 เท่าจากจำนวนเป้าหมาย
+		maxCandidates := plan.Target * 8
+
 		for _, result := range resultsByPlan[i] {
-			if candidateCounts[i] >= plan.Target {
+			if candidateCounts[i] >= maxCandidates {
 				break
 			}
 
@@ -499,8 +533,8 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 			description := strings.TrimSpace(result.Description)
 			coverURL := normalizeCoverURL(result.CoverURL)
 
-			// ไม่รับหนังสือภาษาอังกฤษทุกกรณี
 			if title == "" || author == "" ||
+				result.GoogleBooksID == "" ||
 				!hasThaiText(title) ||
 				result.Language != "th" ||
 				!isValidCoverURL(coverURL) ||
@@ -515,15 +549,14 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			key := strings.ToLower(
-				strings.Join(strings.Fields(title), " ") + "|" +
-					strings.Join(strings.Fields(author), " "),
-			)
+			duplicateKey := makeBookDuplicateKey(title, author)
 
-			if seen[key] {
+			if seenIDs[result.GoogleBooksID] || seenBooks[duplicateKey] {
 				continue
 			}
-			seen[key] = true
+
+			seenIDs[result.GoogleBooksID] = true
+			seenBooks[duplicateKey] = true
 
 			var publishedYear *int
 			if result.PublishedYear > 0 {
@@ -543,6 +576,22 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 
 			candidateCounts[i]++
 		}
+	}
+
+	if len(importBooks) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message":                 "No new Thai books passed the import filters",
+			"successful_searches":     successfulSearches,
+			"search_plans":            len(plans),
+			"candidate_target":        bookTarget,
+			"found":                   0,
+			"rejected_by_relevance":   rejectedByRelevance,
+			"inserted":                0,
+			"skipped":                 0,
+			"total_books_in_database": 0,
+			"visible_catalog_target":  bookTarget,
+		})
+		return
 	}
 
 	inserted, skipped, total, stats, err :=
@@ -568,6 +617,8 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ค้นหาหลายหน้า ทั้ง newest และ relevance
+// เพื่อเพิ่มโอกาสพบหนังสือใหม่ที่ไม่ซ้ำกับฐานข้อมูล
 func (h *Handler) fetchGoogleBooksForImport(
 	ctx context.Context,
 	query string,
@@ -578,74 +629,133 @@ func (h *Handler) fetchGoogleBooksForImport(
 		searchQuery += " subject:" + subject
 	}
 
-	params := url.Values{}
-	params.Set("q", searchQuery)
-	params.Set("maxResults", "40")
-	params.Set("printType", "books")
-	params.Set("orderBy", "relevance")
-	params.Set("langRestrict", "th")
-	params.Set("key", h.GoogleBooksAPIKey)
+	sortOrders := []string{"newest", "relevance"}
 
-	requestURL := googleBooksURL + "?" + params.Encode()
+	results := make([]GoogleBookResult, 0, importPages*importPageSize*2)
+	seenIDs := make(map[string]bool)
+	successfulRequests := 0
+	var lastErr error
 
-	requestCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(
-		requestCtx, http.MethodGet, requestURL, nil,
-	)
-	if err != nil {
-		return nil, err
+	client := &http.Client{
+		Timeout: 9 * time.Second,
 	}
 
-	client := &http.Client{Timeout: 12 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	for _, orderBy := range sortOrders {
+		for page := 0; page < importPages; page++ {
+			if err := ctx.Err(); err != nil {
+				if successfulRequests > 0 {
+					return results, nil
+				}
+				return nil, err
+			}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"Google Books API returned status %d", resp.StatusCode,
-		)
-	}
+			startIndex := page * importPageSize
 
-	var googleResponse GoogleBooksResponse
-	if err := json.NewDecoder(resp.Body).Decode(&googleResponse); err != nil {
-		return nil, err
-	}
+			params := url.Values{}
+			params.Set("q", searchQuery)
+			params.Set("maxResults", fmt.Sprintf("%d", importPageSize))
+			params.Set("startIndex", fmt.Sprintf("%d", startIndex))
+			params.Set("printType", "books")
+			params.Set("orderBy", orderBy)
+			params.Set("langRestrict", "th")
+			params.Set("key", h.GoogleBooksAPIKey)
 
-	results := make([]GoogleBookResult, 0, len(googleResponse.Items))
+			requestURL := googleBooksURL + "?" + params.Encode()
 
-	for _, item := range googleResponse.Items {
-		info := item.VolumeInfo
-		title := strings.TrimSpace(info.Title)
-		author := strings.Join(info.Authors, ", ")
-		coverURL := selectBestCover(info)
-		language := strings.ToLower(strings.TrimSpace(info.Language))
+			requestCtx, cancel := context.WithTimeout(ctx, 9*time.Second)
 
-		if title == "" || item.ID == "" ||
-			strings.TrimSpace(author) == "" ||
-			language != "th" ||
-			!hasThaiText(title) ||
-			!isValidCoverURL(coverURL) ||
-			isPeriodical(title) {
-			continue
+			req, err := http.NewRequestWithContext(
+				requestCtx,
+				http.MethodGet,
+				requestURL,
+				nil,
+			)
+
+			if err != nil {
+				cancel()
+				lastErr = err
+				continue
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				cancel()
+				lastErr = err
+				continue
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				lastErr = fmt.Errorf(
+					"Google Books API returned status %d",
+					resp.StatusCode,
+				)
+				resp.Body.Close()
+				cancel()
+				continue
+			}
+
+			var googleResponse GoogleBooksResponse
+			decodeErr := json.NewDecoder(resp.Body).Decode(&googleResponse)
+
+			resp.Body.Close()
+			cancel()
+
+			if decodeErr != nil {
+				lastErr = decodeErr
+				continue
+			}
+
+			successfulRequests++
+
+			// ถ้าหน้านี้ไม่มีรายการแล้ว ไม่ต้องค้นหาหน้าถัดไป
+			if len(googleResponse.Items) == 0 {
+				break
+			}
+
+			for _, item := range googleResponse.Items {
+				info := item.VolumeInfo
+
+				title := strings.TrimSpace(info.Title)
+				author := strings.Join(info.Authors, ", ")
+				coverURL := selectBestCover(info)
+				language := strings.ToLower(strings.TrimSpace(info.Language))
+
+				if title == "" ||
+					item.ID == "" ||
+					strings.TrimSpace(author) == "" ||
+					language != "th" ||
+					!hasThaiText(title) ||
+					!isValidCoverURL(coverURL) ||
+					isPeriodical(title) {
+					continue
+				}
+
+				if seenIDs[item.ID] {
+					continue
+				}
+				seenIDs[item.ID] = true
+
+				results = append(results, GoogleBookResult{
+					GoogleBooksID: item.ID,
+					Title:         title,
+					Author:        author,
+					Authors:       info.Authors,
+					Description:   strings.TrimSpace(info.Description),
+					CoverURL:      coverURL,
+					PublishedDate: info.PublishedDate,
+					PublishedYear: extractPublishedYear(info.PublishedDate),
+					Language:      "th",
+					Categories:    info.Categories,
+				})
+			}
 		}
+	}
 
-		results = append(results, GoogleBookResult{
-			GoogleBooksID: item.ID,
-			Title:         title,
-			Author:        author,
-			Authors:       info.Authors,
-			Description:   strings.TrimSpace(info.Description),
-			CoverURL:      coverURL,
-			PublishedDate: info.PublishedDate,
-			PublishedYear: extractPublishedYear(info.PublishedDate),
-			Language:      "th",
-			Categories:    info.Categories,
-		})
+	if successfulRequests == 0 {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no successful Google Books search")
 	}
 
 	return results, nil
