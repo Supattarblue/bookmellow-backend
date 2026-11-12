@@ -106,6 +106,7 @@ func isValidCoverURL(value string) bool {
 	if err != nil {
 		return false
 	}
+
 	return parsed.Scheme == "https" && parsed.Host != ""
 }
 
@@ -124,6 +125,7 @@ func isPeriodical(title string) bool {
 
 func extractPublishedYear(date string) int {
 	date = strings.TrimSpace(date)
+
 	if len(date) < 4 {
 		return 0
 	}
@@ -136,16 +138,19 @@ func extractPublishedYear(date string) int {
 	if year < 1 || year > 9999 {
 		return 0
 	}
+
 	return year
 }
 
 func containsAny(value string, keywords []string) bool {
 	value = strings.ToLower(value)
+
 	for _, keyword := range keywords {
 		if strings.Contains(value, strings.ToLower(keyword)) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -155,6 +160,7 @@ func hasThaiText(value string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -285,6 +291,7 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "Search query is required")
 		return
 	}
+
 	if len(query) > 200 {
 		writeError(w, http.StatusBadRequest, "Search query is too long")
 		return
@@ -317,6 +324,7 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	}
 
 	requestURL := googleBooksURL + "?" + params.Encode()
+
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -392,7 +400,8 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// AdminBulkImportBooks ค้นหาหนังสือภาษาไทยและบันทึกแทนรายการภาษาอังกฤษใน Supabase
+// AdminBulkImportBooks ค้นหาและเพิ่มหนังสือภาษาไทยลง Supabase
+// โดยไม่ลบหรือเขียนทับหนังสือเดิม
 func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -409,7 +418,7 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		{Query: "นิยายระทึกขวัญ ภาษาไทย", Language: "th", Subject: "Fiction", Categories: []string{"Thriller"}},
 		{Query: "นิยายวัยรุ่น ภาษาไทย", Language: "th", Subject: "Young Adult", Categories: []string{"Young Adult"}},
 		{Query: "นิยายวิทยาศาสตร์ ภาษาไทย", Language: "th", Subject: "Science Fiction", Categories: []string{"Science Fiction"}},
-		{Query: "หนังสือสยองขวัญ ภาษาไทย", Language: "th", Subject: "Horror", Categories: []string{"Horror"}},
+		{Query: "หนังสือสยองขวัญ ภาษาไทย", Language: "th", Subject: "Fiction", Categories: []string{"Horror"}},
 		{Query: "จิตวิทยา พัฒนาตนเอง ภาษาไทย", Language: "th", Subject: "Self-Help", Categories: []string{"Self-Help"}},
 		{Query: "ชีวประวัติ บุคคลสำคัญ ภาษาไทย", Language: "th", Subject: "Biography & Autobiography", Categories: []string{"Biography"}},
 		{Query: "หนังสือความรู้สำหรับเด็ก ภาษาไทย", Language: "th", Subject: "Juvenile Nonfiction", Categories: []string{"Children"}},
@@ -424,11 +433,13 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 
 	resultsByPlan := make([][]GoogleBookResult, len(plans))
 	errorsByPlan := make([]error, len(plans))
+
 	semaphore := make(chan struct{}, 6)
 	var wg sync.WaitGroup
 
 	for i, plan := range plans {
 		wg.Add(1)
+
 		go func(index int, currentPlan bulkSearchPlan) {
 			defer wg.Done()
 
@@ -438,7 +449,10 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				errorsByPlan[index] = ctx.Err()
 				return
 			}
-			defer func() { <-semaphore }()
+
+			defer func() {
+				<-semaphore
+			}()
 
 			results, err := h.fetchGoogleBooksForImport(
 				ctx,
@@ -446,6 +460,7 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				currentPlan.Language,
 				currentPlan.Subject,
 			)
+
 			resultsByPlan[index] = results
 			errorsByPlan[index] = err
 		}(i, plan)
@@ -459,11 +474,13 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	successfulSearches := 0
+
 	for _, searchErr := range errorsByPlan {
 		if searchErr == nil {
 			successfulSearches++
 		}
 	}
+
 	if successfulSearches == 0 {
 		writeError(w, http.StatusBadGateway, "All Google Books searches failed")
 		return
@@ -483,13 +500,17 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 			description := strings.TrimSpace(result.Description)
 			coverURL := normalizeCoverURL(result.CoverURL)
 
-			if title == "" || author == "" ||
-				!isValidCoverURL(coverURL) || isPeriodical(title) ||
-				!hasThaiText(title+" "+description) {
+			if title == "" ||
+				author == "" ||
+				!isValidCoverURL(coverURL) ||
+				isPeriodical(title) ||
+				!hasThaiText(title) ||
+				!strings.EqualFold(result.Language, "th") {
 				continue
 			}
 
-			if isLowQualityDiscoverBook(result) || isAdultRomance(title+" "+description) {
+			if isLowQualityDiscoverBook(result) ||
+				isAdultRomance(title+" "+description) {
 				continue
 			}
 
@@ -497,12 +518,15 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				strings.Join(strings.Fields(title), " ") + "|" +
 					strings.Join(strings.Fields(author), " "),
 			)
+
 			if seen[key] {
 				continue
 			}
+
 			seen[key] = true
 
 			var publishedYear *int
+
 			if result.PublishedYear > 0 {
 				year := result.PublishedYear
 				publishedYear = &year
@@ -520,24 +544,25 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	replaced, skipped, total, remaining, stats, err :=
-		h.Store.AdminReplaceNonThaiBooks(r.Context(), importBooks)
+	inserted, skipped, total, stats, err :=
+		h.Store.AdminBulkImportBooksDetailed(r.Context(), importBooks)
+
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"message":             "Thai book replacement completed",
+		"message":             "Thai books imported successfully",
 		"successful_searches": successfulSearches,
 		"found":               len(importBooks),
 		"thai_candidates":     len(importBooks),
 		"foreign_candidates":  0,
-		"replaced":            replaced,
+		"inserted":            inserted,
 		"skipped":             skipped,
 		"skip_reasons":        stats,
-		"total":               total,
-		"remaining":           remaining,
+		"total_books":         total,
+		"target":              88,
 	})
 }
 
@@ -548,6 +573,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 	subject string,
 ) ([]GoogleBookResult, error) {
 	searchQuery := query
+
 	if subject != "" {
 		searchQuery += " subject:" + subject
 	}
@@ -576,6 +602,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 	}
 
 	client := &http.Client{Timeout: 12 * time.Second}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -590,6 +617,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 	}
 
 	var googleResponse GoogleBooksResponse
+
 	if err := json.NewDecoder(resp.Body).Decode(&googleResponse); err != nil {
 		return nil, err
 	}
@@ -598,20 +626,21 @@ func (h *Handler) fetchGoogleBooksForImport(
 
 	for _, item := range googleResponse.Items {
 		info := item.VolumeInfo
+
 		title := strings.TrimSpace(info.Title)
 		author := strings.Join(info.Authors, ", ")
 		coverURL := selectBestCover(info)
-
 		language := strings.ToLower(strings.TrimSpace(info.Language))
 
-		// ยึดภาษาที่ตรวจพบจากเนื้อหาจริงเป็นหลัก
-		if hasThaiText(title + " " + info.Description) {
-			language = "th"
-		}
-
-		if title == "" || strings.TrimSpace(author) == "" ||
-			!hasThaiText(title+" "+info.Description) ||
-			!isValidCoverURL(coverURL) || isPeriodical(title) {
+		// ต้องเป็นหนังสือที่ Google Books ระบุว่าเป็นภาษาไทย
+		// และชื่อหนังสือต้องมีอักษรภาษาไทยจริง
+		if title == "" ||
+			item.ID == "" ||
+			strings.TrimSpace(author) == "" ||
+			language != "th" ||
+			!hasThaiText(title) ||
+			!isValidCoverURL(coverURL) ||
+			isPeriodical(title) {
 			continue
 		}
 

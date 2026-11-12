@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
 	"strings"
 
@@ -24,11 +23,7 @@ func (s *Store) AdminDashboard(ctx context.Context) (*AdminStats, error) {
 			(SELECT COUNT(*) FROM books),
 			(SELECT COUNT(*) FROM users WHERE role = 'member'),
 			(SELECT COUNT(*) FROM users WHERE role = 'admin')
-	`).Scan(
-		&stats.Books,
-		&stats.Members,
-		&stats.Admins,
-	)
+	`).Scan(&stats.Books, &stats.Members, &stats.Admins)
 	if err != nil {
 		return nil, err
 	}
@@ -53,16 +48,9 @@ func (s *Store) AdminListMembers(ctx context.Context, search string) ([]User, er
 
 	for rows.Next() {
 		var user User
-
-		if err := rows.Scan(
-			&user.ID,
-			&user.Username,
-			&user.Email,
-			&user.Role,
-		); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.Role); err != nil {
 			return nil, err
 		}
-
 		members = append(members, user)
 	}
 
@@ -82,10 +70,7 @@ func (s *Store) AdminUpdateMember(ctx context.Context, id, username, email strin
 		WHERE id = $3
 		RETURNING id, username, email, role
 	`, username, email, id).Scan(
-		&user.ID,
-		&user.Username,
-		&user.Email,
-		&user.Role,
+		&user.ID, &user.Username, &user.Email, &user.Role,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -105,14 +90,9 @@ func (s *Store) AdminSetRole(ctx context.Context, id, role string) error {
 	defer tx.Rollback(ctx)
 
 	var currentRole string
-
 	err = tx.QueryRow(ctx, `
-		SELECT role
-		FROM users
-		WHERE id = $1
-		FOR UPDATE
+		SELECT role FROM users WHERE id = $1 FOR UPDATE
 	`, id).Scan(&currentRole)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -122,28 +102,20 @@ func (s *Store) AdminSetRole(ctx context.Context, id, role string) error {
 
 	if currentRole == "admin" && role == "member" {
 		var adminCount int
-
 		err = tx.QueryRow(ctx, `
-			SELECT COUNT(*)
-			FROM users
-			WHERE role = 'admin'
+			SELECT COUNT(*) FROM users WHERE role = 'admin'
 		`).Scan(&adminCount)
-
 		if err != nil {
 			return err
 		}
-
 		if adminCount <= 1 {
 			return errors.New("cannot change the role of the last admin")
 		}
 	}
 
 	_, err = tx.Exec(ctx, `
-		UPDATE users
-		SET role = $1
-		WHERE id = $2
+		UPDATE users SET role = $1 WHERE id = $2
 	`, role, id)
-
 	if err != nil {
 		return err
 	}
@@ -159,14 +131,9 @@ func (s *Store) AdminDeleteMember(ctx context.Context, id string) error {
 	defer tx.Rollback(ctx)
 
 	var role string
-
 	err = tx.QueryRow(ctx, `
-		SELECT role
-		FROM users
-		WHERE id = $1
-		FOR UPDATE
+		SELECT role FROM users WHERE id = $1 FOR UPDATE
 	`, id).Scan(&role)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -176,27 +143,18 @@ func (s *Store) AdminDeleteMember(ctx context.Context, id string) error {
 
 	if role == "admin" {
 		var adminCount int
-
 		err = tx.QueryRow(ctx, `
-			SELECT COUNT(*)
-			FROM users
-			WHERE role = 'admin'
+			SELECT COUNT(*) FROM users WHERE role = 'admin'
 		`).Scan(&adminCount)
-
 		if err != nil {
 			return err
 		}
-
 		if adminCount <= 1 {
 			return errors.New("cannot delete the last admin")
 		}
 	}
 
-	_, err = tx.Exec(ctx, `
-		DELETE FROM users
-		WHERE id = $1
-	`, id)
-
+	_, err = tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -211,16 +169,24 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 	}
 	defer tx.Rollback(ctx)
 
+	var visible int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM book_catalog_visibility
+		WHERE is_visible = TRUE
+	`).Scan(&visible)
+	if err != nil {
+		return err
+	}
+	if visible >= 88 {
+		return errors.New("book catalog has reached the 88-book limit")
+	}
+
 	err = tx.QueryRow(ctx, `
 		INSERT INTO books (title, author, description, cover_url, published_year)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id
 	`,
-		book.Title,
-		book.Author,
-		book.Description,
-		book.CoverURL,
-		book.PublishedYear,
+		book.Title, book.Author, book.Description, book.CoverURL, book.PublishedYear,
 	).Scan(&book.ID)
 	if err != nil {
 		return err
@@ -236,8 +202,16 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 		}
 	}
 
-	book.Categories = make([]string, 0, len(categoryIDs))
+	_, err = tx.Exec(ctx, `
+		INSERT INTO book_catalog_visibility (book_id, is_visible)
+		VALUES ($1, TRUE)
+		ON CONFLICT (book_id) DO UPDATE SET is_visible = TRUE
+	`, book.ID)
+	if err != nil {
+		return err
+	}
 
+	book.Categories = make([]string, 0, len(categoryIDs))
 	rows, err := tx.Query(ctx, `
 		SELECT c.name
 		FROM categories c
@@ -250,14 +224,12 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 	}
 
 	for rows.Next() {
-		var categoryName string
-
-		if err := rows.Scan(&categoryName); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			rows.Close()
 			return err
 		}
-
-		book.Categories = append(book.Categories, categoryName)
+		book.Categories = append(book.Categories, name)
 	}
 
 	err = rows.Err()
@@ -286,20 +258,15 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 		    updated_at = NOW()
 		WHERE id = $6
 	`,
-		book.Title,
-		book.Author,
-		book.Description,
-		book.CoverURL,
-		book.PublishedYear,
-		book.ID,
+		book.Title, book.Author, book.Description,
+		book.CoverURL, book.PublishedYear, book.ID,
 	)
 	if err != nil {
 		return err
 	}
 
 	_, err = tx.Exec(ctx, `
-		DELETE FROM book_categories
-		WHERE book_id = $1
+		DELETE FROM book_categories WHERE book_id = $1
 	`, book.ID)
 	if err != nil {
 		return err
@@ -316,7 +283,6 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 	}
 
 	book.Categories = make([]string, 0, len(categoryIDs))
-
 	rows, err := tx.Query(ctx, `
 		SELECT c.name
 		FROM categories c
@@ -329,14 +295,12 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 	}
 
 	for rows.Next() {
-		var categoryName string
-
-		if err := rows.Scan(&categoryName); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			rows.Close()
 			return err
 		}
-
-		book.Categories = append(book.Categories, categoryName)
+		book.Categories = append(book.Categories, name)
 	}
 
 	err = rows.Err()
@@ -350,17 +314,14 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 
 func (s *Store) AdminDeleteBook(ctx context.Context, id string) error {
 	result, err := s.DB.Exec(ctx, `
-		DELETE FROM books
-		WHERE id = $1
+		DELETE FROM books WHERE id = $1
 	`, id)
 	if err != nil {
 		return err
 	}
-
 	if result.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-
 	return nil
 }
 
@@ -387,12 +348,29 @@ func (s *Store) AdminBulkCreateBooks(
 		return 0, 0, err
 	}
 
-	added := 0
-	skipped := 0
+	var visible int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM book_catalog_visibility
+		WHERE is_visible = TRUE
+	`).Scan(&visible)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	remaining := 88 - visible
+	if remaining <= 0 {
+		return 0, len(items), nil
+	}
+
+	added, skipped := 0, 0
 
 	for _, item := range items {
-		book := item.Book
+		if added >= remaining {
+			skipped++
+			continue
+		}
 
+		book := item.Book
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
 
@@ -402,43 +380,30 @@ func (s *Store) AdminBulkCreateBooks(
 		}
 
 		var exists bool
-
 		err = tx.QueryRow(ctx, `
 			SELECT EXISTS (
-				SELECT 1
-				FROM books
+				SELECT 1 FROM books
 				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
 				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
 			)
 		`, book.Title, book.Author).Scan(&exists)
-
 		if err != nil {
 			return 0, 0, err
 		}
-
 		if exists {
 			skipped++
 			continue
 		}
 
+		var bookID string
 		err = tx.QueryRow(ctx, `
-			INSERT INTO books (
-				title,
-				author,
-				description,
-				cover_url,
-				published_year
-			)
+			INSERT INTO books (title, author, description, cover_url, published_year)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id
 		`,
-			book.Title,
-			book.Author,
-			book.Description,
-			book.CoverURL,
-			book.PublishedYear,
-		).Scan(&book.ID)
-
+			book.Title, book.Author, book.Description,
+			book.CoverURL, book.PublishedYear,
+		).Scan(&bookID)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -447,11 +412,19 @@ func (s *Store) AdminBulkCreateBooks(
 			_, err = tx.Exec(ctx, `
 				INSERT INTO book_categories (book_id, category_id)
 				VALUES ($1, $2)
-			`, book.ID, categoryID)
-
+			`, bookID, categoryID)
 			if err != nil {
 				return 0, 0, err
 			}
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO book_catalog_visibility (book_id, is_visible)
+			VALUES ($1, TRUE)
+			ON CONFLICT (book_id) DO UPDATE SET is_visible = TRUE
+		`, bookID)
+		if err != nil {
+			return 0, 0, err
 		}
 
 		added++
@@ -488,7 +461,8 @@ func (s *Store) AdminBulkImportBooks(
 	ctx context.Context,
 	books []BulkImportBook,
 ) (int, int, int, error) {
-	inserted, skipped, total, _, err := s.AdminBulkImportBooksDetailed(ctx, books)
+	inserted, skipped, total, _, err :=
+		s.AdminBulkImportBooksDetailed(ctx, books)
 	return inserted, skipped, total, err
 }
 
@@ -511,24 +485,49 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		return 0, 0, 0, stats, err
 	}
 
-	var total int
+	var total, visible int
+
 	err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM books`).Scan(&total)
 	if err != nil {
 		return 0, 0, 0, stats, err
 	}
 
-	inserted := 0
-	skipped := 0
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM book_catalog_visibility
+		WHERE is_visible = TRUE
+	`).Scan(&visible)
+	if err != nil {
+		return 0, 0, 0, stats, err
+	}
+
+	const target = 88
+	remaining := target - visible
+
+	if remaining <= 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return 0, 0, 0, stats, err
+		}
+		return 0, len(books), total, stats, nil
+	}
+
+	inserted, skipped := 0, 0
 
 	for _, candidate := range books {
-		book := candidate
+		if inserted >= remaining {
+			stats.SkippedLimit++
+			skipped++
+			continue
+		}
 
+		book := candidate
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
 		book.Description = strings.TrimSpace(book.Description)
 		book.CoverURL = strings.TrimSpace(book.CoverURL)
 
-		if !strings.EqualFold(strings.TrimSpace(book.Language), "th") {
+		if !strings.EqualFold(strings.TrimSpace(book.Language), "th") ||
+			!hasThaiScript(book.Title) {
 			stats.SkippedNotThai++
 			skipped++
 			continue
@@ -550,8 +549,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		var exists bool
 		err = tx.QueryRow(ctx, `
 			SELECT EXISTS (
-				SELECT 1
-				FROM books
+				SELECT 1 FROM books
 				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
 				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
 			)
@@ -569,26 +567,20 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		var bookID string
 		err = tx.QueryRow(ctx, `
 			INSERT INTO books (
-				title,
-				author,
-				description,
-				cover_url,
-				published_year
+				title, author, description, cover_url, published_year
 			)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id
 		`,
-			book.Title,
-			book.Author,
-			book.Description,
-			book.CoverURL,
-			book.PublishedYear,
+			book.Title, book.Author, book.Description,
+			book.CoverURL, book.PublishedYear,
 		).Scan(&bookID)
 		if err != nil {
 			return 0, 0, 0, stats, err
 		}
 
 		matchedCategories := 0
+
 		for _, categoryName := range book.Categories {
 			categoryName = strings.TrimSpace(categoryName)
 			if categoryName == "" {
@@ -597,8 +589,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 
 			var categoryID string
 			err = tx.QueryRow(ctx, `
-				SELECT id
-				FROM categories
+				SELECT id FROM categories
 				WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
 				LIMIT 1
 			`, categoryName).Scan(&categoryID)
@@ -619,24 +610,24 @@ func (s *Store) AdminBulkImportBooksDetailed(
 			if err != nil {
 				return 0, 0, 0, stats, err
 			}
+
 			matchedCategories++
 		}
 
 		if matchedCategories == 0 {
-			var otherCategoryID string
+			var otherID string
 			fallbackErr := tx.QueryRow(ctx, `
-				SELECT id
-				FROM categories
+				SELECT id FROM categories
 				WHERE LOWER(BTRIM(name)) = 'other'
 				LIMIT 1
-			`).Scan(&otherCategoryID)
+			`).Scan(&otherID)
 
 			if fallbackErr == nil {
 				_, err = tx.Exec(ctx, `
 					INSERT INTO book_categories (book_id, category_id)
 					VALUES ($1, $2)
 					ON CONFLICT DO NOTHING
-				`, bookID, otherCategoryID)
+				`, bookID, otherID)
 				if err != nil {
 					return 0, 0, 0, stats, err
 				}
@@ -645,6 +636,16 @@ func (s *Store) AdminBulkImportBooksDetailed(
 			} else {
 				return 0, 0, 0, stats, fallbackErr
 			}
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO book_catalog_visibility (book_id, is_visible)
+			VALUES ($1, TRUE)
+			ON CONFLICT (book_id)
+			DO UPDATE SET is_visible = TRUE
+		`, bookID)
+		if err != nil {
+			return 0, 0, 0, stats, err
 		}
 
 		inserted++
@@ -658,220 +659,13 @@ func (s *Store) AdminBulkImportBooksDetailed(
 	return inserted, skipped, total, stats, nil
 }
 
-// แทนที่หนังสือที่ไม่มีอักษรไทยจำนวน 85 รายการ
-// คง ID เดิมและข้อมูลตารางอื่นไว้ทั้งหมด
-// จะบันทึกก็ต่อเมื่อมีหนังสือไทยที่ผ่านการตรวจครบ 85 รายการเท่านั้น
+// ปิดการแทนที่หนังสือเดิม เพื่อป้องกันรีวิวและรายการโปรดผูกผิดเล่ม
 func (s *Store) AdminReplaceNonThaiBooks(
 	ctx context.Context,
 	books []BulkImportBook,
 ) (replaced, skipped, total, remaining int, stats BulkImportStats, err error) {
-	const expectedTargets = 85
-
-	tx, err := s.DB.Begin(ctx)
-	if err != nil {
-		return 0, 0, 0, 0, stats, err
-	}
-	defer tx.Rollback(ctx)
-
-	_, err = tx.Exec(ctx, `LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE`)
-	if err != nil {
-		return 0, 0, 0, 0, stats, err
-	}
-
-	rows, err := tx.Query(ctx, `
-		SELECT id
-		FROM books
-		WHERE COALESCE(title, '') !~ '[ก-๙]'
-		ORDER BY id
-		FOR UPDATE
-	`)
-	if err != nil {
-		return 0, 0, 0, 0, stats, err
-	}
-
-	targetIDs := make([]string, 0, expectedTargets)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return 0, 0, 0, 0, stats, err
-		}
-		targetIDs = append(targetIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, 0, 0, 0, stats, err
-	}
-	rows.Close()
-
-	if len(targetIDs) != expectedTargets {
-		return 0, 0, 0, 0, stats, fmt.Errorf(
-			"replacement cancelled: expected %d non-Thai books, found %d; no data changed",
-			expectedTargets, len(targetIDs),
-		)
-	}
-
-	validBooks := make([]BulkImportBook, 0, expectedTargets)
-	seen := make(map[string]bool)
-
-	for _, candidate := range books {
-		book := candidate
-		book.Title = strings.TrimSpace(book.Title)
-		book.Author = strings.TrimSpace(book.Author)
-		book.Description = strings.TrimSpace(book.Description)
-		book.CoverURL = strings.TrimSpace(book.CoverURL)
-
-		if !strings.EqualFold(strings.TrimSpace(book.Language), "th") ||
-			!hasThaiScript(book.Title+" "+book.Description) {
-			stats.SkippedNotThai++
-			skipped++
-			continue
-		}
-
-		if book.Title == "" || book.Author == "" ||
-			book.Description == "" || book.CoverURL == "" {
-			stats.SkippedMissingFields++
-			skipped++
-			continue
-		}
-
-		parsedURL, parseErr := url.ParseRequestURI(book.CoverURL)
-		if parseErr != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
-			stats.SkippedInvalidCover++
-			skipped++
-			continue
-		}
-
-		key := strings.ToLower(
-			strings.Join(strings.Fields(book.Title), " ") + "|" +
-				strings.Join(strings.Fields(book.Author), " "),
-		)
-
-		if seen[key] {
-			stats.SkippedDuplicate++
-			skipped++
-			continue
-		}
-
-		var exists bool
-		err = tx.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1
-				FROM books
-				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
-				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
-				  AND id::text <> ALL($3::text[])
-			)
-		`, book.Title, book.Author, targetIDs).Scan(&exists)
-		if err != nil {
-			return 0, 0, 0, 0, stats, err
-		}
-
-		if exists {
-			stats.SkippedDuplicate++
-			skipped++
-			continue
-		}
-
-		seen[key] = true
-		validBooks = append(validBooks, book)
-	}
-
-	if len(validBooks) < expectedTargets {
-		return 0, skipped, 0, expectedTargets, stats, fmt.Errorf(
-			"replacement cancelled: only %d valid unique Thai books available; need %d; no data changed",
-			len(validBooks), expectedTargets,
-		)
-	}
-
-	for i := 0; i < expectedTargets; i++ {
-		book := validBooks[i]
-		bookID := targetIDs[i]
-
-		_, err = tx.Exec(ctx, `
-			UPDATE books
-			SET title = $1,
-			    author = $2,
-			    description = $3,
-			    cover_url = $4,
-			    published_year = $5,
-			    updated_at = NOW()
-			WHERE id = $6
-		`,
-			book.Title,
-			book.Author,
-			book.Description,
-			book.CoverURL,
-			book.PublishedYear,
-			bookID,
-		)
-		if err != nil {
-			return 0, 0, 0, 0, stats, err
-		}
-
-		_, err = tx.Exec(ctx, `
-			DELETE FROM book_categories
-			WHERE book_id = $1
-		`, bookID)
-		if err != nil {
-			return 0, 0, 0, 0, stats, err
-		}
-
-		matchedCategories := 0
-
-		for _, categoryName := range book.Categories {
-			categoryName = strings.TrimSpace(categoryName)
-			if categoryName == "" {
-				continue
-			}
-
-			var categoryID string
-			err = tx.QueryRow(ctx, `
-				SELECT id
-				FROM categories
-				WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
-				LIMIT 1
-			`, categoryName).Scan(&categoryID)
-
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					stats.UnmatchedCategories++
-					continue
-				}
-				return 0, 0, 0, 0, stats, err
-			}
-
-			_, err = tx.Exec(ctx, `
-				INSERT INTO book_categories (book_id, category_id)
-				VALUES ($1, $2)
-				ON CONFLICT DO NOTHING
-			`, bookID, categoryID)
-			if err != nil {
-				return 0, 0, 0, 0, stats, err
-			}
-
-			matchedCategories++
-		}
-
-		if matchedCategories == 0 {
-			stats.InsertedWithoutCategory++
-		}
-
-		replaced++
-	}
-
-	err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM books`).Scan(&total)
-	if err != nil {
-		return 0, 0, 0, 0, stats, err
-	}
-
-	remaining = expectedTargets - replaced
-
-	if err := tx.Commit(ctx); err != nil {
-		return 0, 0, 0, 0, stats, err
-	}
-
-	return replaced, skipped, total, remaining, stats, nil
+	return 0, 0, 0, 0, stats,
+		errors.New("replacing existing books is disabled; use AdminBulkImportBooksDetailed")
 }
 
 func hasThaiScript(value string) bool {

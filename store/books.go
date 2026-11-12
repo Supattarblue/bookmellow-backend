@@ -31,6 +31,9 @@ func (s *Store) ListBooks(ctx context.Context, search, category string) ([]Book,
 				'{}'
 			)
 		FROM books b
+		JOIN book_catalog_visibility v
+			ON v.book_id = b.id
+			AND v.is_visible = TRUE
 		LEFT JOIN book_categories bc ON bc.book_id = b.id
 		LEFT JOIN categories c ON c.id = bc.category_id
 		WHERE
@@ -44,6 +47,7 @@ func (s *Store) ListBooks(ctx context.Context, search, category string) ([]Book,
 		GROUP BY b.id
 		ORDER BY b.created_at DESC
 	`, search, category)
+
 	if err != nil {
 		return nil, err
 	}
