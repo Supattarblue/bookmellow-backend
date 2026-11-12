@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Supattarblue/bookmellow-backend/store"
@@ -16,7 +17,7 @@ const (
 	googleBooksURL = "https://www.googleapis.com/books/v1/volumes"
 	bookTarget     = 100
 	minBookYear    = 2019
-	importPages    = 4
+	importPages    = 2
 	importPageSize = 40
 )
 
@@ -356,7 +357,8 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 85*time.Second)
+	// จำกัดเวลารวมให้สั้นกว่าเวลาที่ Render มักตัดการเชื่อมต่อ
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
 
 	results, err := h.fetchGoogleBooksForImport(ctx)
@@ -434,8 +436,9 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ใช้ ctx เดียวกัน เพื่อให้การบันทึกอยู่ภายใต้เวลาที่กำหนดด้วย
 	inserted, skipped, total, stats, err :=
-		h.Store.AdminBulkImportBooksDetailed(r.Context(), importBooks)
+		h.Store.AdminBulkImportBooksDetailed(ctx, importBooks)
 
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
@@ -459,11 +462,10 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) fetchGoogleBooksForImport(
 	ctx context.Context,
 ) ([]GoogleBookResult, error) {
-	results := make([]GoogleBookResult, 0)
-	seenIDs := make(map[string]bool)
-
-	client := &http.Client{
-		Timeout: 8 * time.Second,
+	type searchTask struct {
+		language string
+		query    string
+		page     int
 	}
 
 	languageQueries := map[string]string{
@@ -473,32 +475,54 @@ func (h *Handler) fetchGoogleBooksForImport(
 		"ko": "책",
 	}
 
-	var lastErr error
-	successfulRequests := 0
+	tasks := make([]searchTask, 0, len(supportedBookLanguages)*importPages)
 
 	for _, language := range supportedBookLanguages {
-		query := languageQueries[language]
-
 		for page := 0; page < importPages; page++ {
-			if err := ctx.Err(); err != nil {
-				if len(results) > 0 {
-					return results, nil
-				}
-				return nil, err
-			}
+			tasks = append(tasks, searchTask{
+				language: language,
+				query:    languageQueries[language],
+				page:     page,
+			})
+		}
+	}
+
+	// แต่ละคำขอเขียนผลลง index ของตัวเอง
+	pageResults := make([][]GoogleBookResult, len(tasks))
+
+	client := &http.Client{
+		Timeout: 8 * time.Second,
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	successfulRequests := 0
+	var lastErr error
+
+	for i, task := range tasks {
+		if ctx.Err() != nil {
+			break
+		}
+
+		wg.Add(1)
+
+		go func(index int, task searchTask) {
+			defer wg.Done()
+
+			requestCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
 
 			params := url.Values{}
-			params.Set("q", query)
+			params.Set("q", task.query)
 			params.Set("maxResults", fmt.Sprintf("%d", importPageSize))
-			params.Set("startIndex", fmt.Sprintf("%d", page*importPageSize))
+			params.Set("startIndex", fmt.Sprintf("%d", task.page*importPageSize))
 			params.Set("printType", "books")
 			params.Set("orderBy", "newest")
-			params.Set("langRestrict", language)
+			params.Set("langRestrict", task.language)
 			params.Set("key", h.GoogleBooksAPIKey)
 
 			requestURL := googleBooksURL + "?" + params.Encode()
-
-			requestCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 
 			req, err := http.NewRequestWithContext(
 				requestCtx,
@@ -506,50 +530,44 @@ func (h *Handler) fetchGoogleBooksForImport(
 				requestURL,
 				nil,
 			)
-
 			if err != nil {
-				cancel()
+				mu.Lock()
 				lastErr = err
-				continue
+				mu.Unlock()
+				return
 			}
 
 			resp, err := client.Do(req)
-
 			if err != nil {
-				cancel()
+				mu.Lock()
 				lastErr = err
-				continue
+				mu.Unlock()
+				return
 			}
+			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
+				mu.Lock()
 				lastErr = fmt.Errorf(
-					"Google Books API returned status %d for language %s",
+					"Google Books API returned status %d for language %s page %d",
 					resp.StatusCode,
-					language,
+					task.language,
+					task.page,
 				)
-
-				resp.Body.Close()
-				cancel()
-				continue
+				mu.Unlock()
+				return
 			}
 
 			var googleResponse GoogleBooksResponse
 
-			decodeErr := json.NewDecoder(resp.Body).Decode(&googleResponse)
-
-			resp.Body.Close()
-			cancel()
-
-			if decodeErr != nil {
-				lastErr = decodeErr
-				continue
+			if err := json.NewDecoder(resp.Body).Decode(&googleResponse); err != nil {
+				mu.Lock()
+				lastErr = err
+				mu.Unlock()
+				return
 			}
 
-			successfulRequests++
-
-			if len(googleResponse.Items) == 0 {
-				break
-			}
+			results := make([]GoogleBookResult, 0, len(googleResponse.Items))
 
 			for _, item := range googleResponse.Items {
 				info := item.VolumeInfo
@@ -563,18 +581,12 @@ func (h *Handler) fetchGoogleBooksForImport(
 				if title == "" ||
 					author == "" ||
 					item.ID == "" ||
-					bookLanguage != language ||
+					bookLanguage != task.language ||
 					year < minBookYear ||
 					!isValidCoverURL(coverURL) ||
 					isPeriodical(title) {
 					continue
 				}
-
-				if seenIDs[item.ID] {
-					continue
-				}
-
-				seenIDs[item.ID] = true
 
 				result := GoogleBookResult{
 					GoogleBooksID: item.ID,
@@ -595,6 +607,28 @@ func (h *Handler) fetchGoogleBooksForImport(
 
 				results = append(results, result)
 			}
+
+			pageResults[index] = results
+
+			mu.Lock()
+			successfulRequests++
+			mu.Unlock()
+		}(i, task)
+	}
+
+	wg.Wait()
+
+	allResults := make([]GoogleBookResult, 0)
+	seenIDs := make(map[string]bool)
+
+	for _, page := range pageResults {
+		for _, result := range page {
+			if seenIDs[result.GoogleBooksID] {
+				continue
+			}
+
+			seenIDs[result.GoogleBooksID] = true
+			allResults = append(allResults, result)
 		}
 	}
 
@@ -603,8 +637,12 @@ func (h *Handler) fetchGoogleBooksForImport(
 			return nil, lastErr
 		}
 
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		return nil, fmt.Errorf("no successful Google Books search")
 	}
 
-	return results, nil
+	return allResults, nil
 }
