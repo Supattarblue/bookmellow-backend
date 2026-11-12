@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -64,7 +65,6 @@ func run() error {
 	issuer := auth.NewIssuer(jwtSecret)
 
 	googleBooksAPIKey := os.Getenv("GOOGLE_BOOKS_API_KEY")
-
 	h := handler.New(st, issuer, googleBooksAPIKey)
 
 	mux := http.NewServeMux()
@@ -96,6 +96,7 @@ func run() error {
 
 	// Books
 	mux.HandleFunc("GET /api/books", h.ListBooks)
+	mux.HandleFunc("GET /api/books/discover", h.DiscoverBooks)
 	mux.HandleFunc("GET /api/books/{id}", h.GetBook)
 
 	// Categories
@@ -125,10 +126,6 @@ func run() error {
 		mw.RequireLogin(issuer, http.HandlerFunc(h.RemoveFavorite)),
 	)
 
-	// Books
-	mux.HandleFunc("GET /api/books", h.ListBooks)
-	mux.HandleFunc("GET /api/books/discover", h.DiscoverBooks)
-	mux.HandleFunc("GET /api/books/{id}", h.GetBook)
 	// Reviews
 	mux.HandleFunc("GET /api/books/{id}/reviews", h.ListReviews)
 	mux.Handle("POST /api/books/{id}/reviews",
