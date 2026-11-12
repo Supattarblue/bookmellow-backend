@@ -1,4 +1,3 @@
-
 package handler
 
 import (
@@ -32,8 +31,12 @@ type GoogleBookVolumeInfo struct {
 	PublishedDate string   `json:"publishedDate"`
 	Categories    []string `json:"categories"`
 	ImageLinks    struct {
-		Thumbnail      string `json:"thumbnail"`
 		SmallThumbnail string `json:"smallThumbnail"`
+		Thumbnail      string `json:"thumbnail"`
+		Small          string `json:"small"`
+		Medium         string `json:"medium"`
+		Large          string `json:"large"`
+		ExtraLarge     string `json:"extraLarge"`
 	} `json:"imageLinks"`
 }
 
@@ -139,12 +142,7 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 
-		coverURL := info.ImageLinks.Thumbnail
-		if coverURL == "" {
-			coverURL = info.ImageLinks.SmallThumbnail
-		}
-
-		coverURL = normalizeCoverURL(coverURL)
+		coverURL := selectBestCover(info)
 
 		if !isValidCoverURL(coverURL) || isPeriodical(title) {
 			continue
@@ -173,7 +171,41 @@ func normalizeCoverURL(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.Replace(value, "http://", "https://", 1)
 	value = strings.ReplaceAll(value, "&amp;", "&")
+
+	// ขอภาพขนาดใหญ่ขึ้นจาก Google Books เมื่อ URL รองรับพารามิเตอร์นี้
+	if value != "" {
+		parsed, err := url.Parse(value)
+		if err == nil {
+			query := parsed.Query()
+			query.Set("zoom", "2")
+			parsed.RawQuery = query.Encode()
+			value = parsed.String()
+		}
+	}
+
 	return value
+}
+
+// เลือกภาพปกจากความละเอียดสูงสุดที่ Google Books ส่งมาให้
+func selectBestCover(info GoogleBookVolumeInfo) string {
+	candidates := []string{
+		info.ImageLinks.ExtraLarge,
+		info.ImageLinks.Large,
+		info.ImageLinks.Medium,
+		info.ImageLinks.Small,
+		info.ImageLinks.Thumbnail,
+		info.ImageLinks.SmallThumbnail,
+	}
+
+	for _, candidate := range candidates {
+		candidate = normalizeCoverURL(candidate)
+
+		if isValidCoverURL(candidate) {
+			return candidate
+		}
+	}
+
+	return ""
 }
 
 func isValidCoverURL(value string) bool {
@@ -455,7 +487,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// นับจำนวนหนังสือที่ผ่านการกรอง แยกตามภาษาที่ใช้ค้นหา
 	thaiCandidates := 0
 	foreignCandidates := 0
 
@@ -550,12 +581,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 		title := strings.TrimSpace(info.Title)
 		author := strings.Join(info.Authors, ", ")
 
-		coverURL := info.ImageLinks.Thumbnail
-		if coverURL == "" {
-			coverURL = info.ImageLinks.SmallThumbnail
-		}
-
-		coverURL = normalizeCoverURL(coverURL)
+		coverURL := selectBestCover(info)
 
 		if title == "" || strings.TrimSpace(author) == "" || !isValidCoverURL(coverURL) {
 			continue
