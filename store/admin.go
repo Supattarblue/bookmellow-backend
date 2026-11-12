@@ -485,14 +485,17 @@ type BulkImportBook struct {
 }
 
 type BulkImportStats struct {
-	SkippedLimit            int `json:"limit_reached"`
-	SkippedNotThai          int `json:"unsupported_language_or_title"`
-	SkippedMissingFields    int `json:"missing_required_fields"`
-	SkippedInvalidCover     int `json:"invalid_cover_url"`
-	SkippedDuplicate        int `json:"duplicate"`
-	SkippedOldYear          int `json:"published_before_2019"`
-	UnmatchedCategories     int `json:"unmatched_categories"`
-	InsertedWithoutCategory int `json:"inserted_without_category"`
+	SkippedLimit            int            `json:"limit_reached"`
+	SkippedNotThai          int            `json:"unsupported_language_or_title"`
+	SkippedMissingFields    int            `json:"missing_required_fields"`
+	SkippedInvalidCover     int            `json:"invalid_cover_url"`
+	SkippedDuplicate        int            `json:"duplicate"`
+	SkippedOldYear          int            `json:"published_before_2019"`
+	UnmatchedCategories     int            `json:"unmatched_categories"`
+	InsertedWithoutCategory int            `json:"inserted_without_category"`
+	SkippedCategoryLimit    int            `json:"category_limit_reached"`
+	SkippedInvalidCategory  int            `json:"invalid_category"`
+	InsertedByCategory      map[string]int `json:"inserted_by_category"`
 }
 
 func (s *Store) AdminBulkImportBooks(
@@ -508,7 +511,9 @@ func (s *Store) AdminBulkImportBooksDetailed(
 	ctx context.Context,
 	books []BulkImportBook,
 ) (int, int, int, BulkImportStats, error) {
-	stats := BulkImportStats{}
+	stats := BulkImportStats{
+		InsertedByCategory: make(map[string]int),
+	}
 
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
@@ -525,7 +530,9 @@ func (s *Store) AdminBulkImportBooksDetailed(
 
 	var total, visible int
 
-	err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM books`).Scan(&total)
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM books
+	`).Scan(&total)
 	if err != nil {
 		return 0, 0, 0, stats, err
 	}
@@ -540,14 +547,19 @@ func (s *Store) AdminBulkImportBooksDetailed(
 	}
 
 	remaining := BookCatalogTarget - visible
+
 	if remaining <= 0 {
+		stats.SkippedLimit = len(books)
+
 		if err := tx.Commit(ctx); err != nil {
 			return 0, 0, 0, stats, err
 		}
+
 		return 0, len(books), total, stats, nil
 	}
 
 	inserted, skipped := 0, 0
+	categoryCounts := make(map[string]int)
 
 	allowedLanguages := map[string]bool{
 		"th": true,
@@ -564,13 +576,16 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		}
 
 		book := candidate
+
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
 		book.Description = strings.TrimSpace(book.Description)
 		book.CoverURL = strings.TrimSpace(book.CoverURL)
 		book.Language = strings.ToLower(strings.TrimSpace(book.Language))
 
-		if book.Title == "" || book.Author == "" || book.CoverURL == "" {
+		if book.Title == "" ||
+			book.Author == "" ||
+			book.CoverURL == "" {
 			stats.SkippedMissingFields++
 			skipped++
 			continue
@@ -582,27 +597,91 @@ func (s *Store) AdminBulkImportBooksDetailed(
 			continue
 		}
 
-		if book.PublishedYear == nil || *book.PublishedYear < MinimumBookYear {
+		if book.PublishedYear == nil ||
+			*book.PublishedYear < MinimumBookYear {
 			stats.SkippedOldYear++
 			skipped++
 			continue
 		}
 
 		parsedURL, parseErr := url.ParseRequestURI(book.CoverURL)
-		if parseErr != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
+
+		if parseErr != nil ||
+			parsedURL.Scheme != "https" ||
+			parsedURL.Host == "" {
 			stats.SkippedInvalidCover++
 			skipped++
 			continue
 		}
 
+		if len(book.Categories) != 1 {
+			stats.SkippedInvalidCategory++
+			skipped++
+			continue
+		}
+
+		categoryName := strings.TrimSpace(book.Categories[0])
+
+		if categoryName == "" {
+			stats.SkippedInvalidCategory++
+			skipped++
+			continue
+		}
+
+		var categoryID string
+
+		err = tx.QueryRow(ctx, `
+			SELECT id
+			FROM categories
+			WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
+			LIMIT 1
+		`, categoryName).Scan(&categoryID)
+
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				stats.UnmatchedCategories++
+				skipped++
+				continue
+			}
+			return 0, 0, 0, stats, err
+		}
+
+		currentCount, loaded := categoryCounts[categoryID]
+
+		if !loaded {
+			err = tx.QueryRow(ctx, `
+				SELECT COUNT(DISTINCT bc.book_id)
+				FROM book_categories bc
+				INNER JOIN book_catalog_visibility v
+					ON v.book_id = bc.book_id
+				WHERE bc.category_id = $1
+				  AND v.is_visible = TRUE
+			`, categoryID).Scan(&currentCount)
+
+			if err != nil {
+				return 0, 0, 0, stats, err
+			}
+
+			categoryCounts[categoryID] = currentCount
+		}
+
+		if currentCount >= 5 {
+			stats.SkippedCategoryLimit++
+			skipped++
+			continue
+		}
+
 		var exists bool
+
 		err = tx.QueryRow(ctx, `
 			SELECT EXISTS (
-				SELECT 1 FROM books
+				SELECT 1
+				FROM books
 				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
 				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
 			)
 		`, book.Title, book.Author).Scan(&exists)
+
 		if err != nil {
 			return 0, 0, 0, stats, err
 		}
@@ -614,77 +693,37 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		}
 
 		var bookID string
+
 		err = tx.QueryRow(ctx, `
 			INSERT INTO books (
-				title, author, description, cover_url, published_year
+				title,
+				author,
+				description,
+				cover_url,
+				published_year
 			)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id
 		`,
-			book.Title, book.Author, book.Description,
-			book.CoverURL, book.PublishedYear,
+			book.Title,
+			book.Author,
+			book.Description,
+			book.CoverURL,
+			book.PublishedYear,
 		).Scan(&bookID)
+
 		if err != nil {
 			return 0, 0, 0, stats, err
 		}
 
-		matchedCategories := 0
+		_, err = tx.Exec(ctx, `
+			INSERT INTO book_categories (book_id, category_id)
+			VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, bookID, categoryID)
 
-		for _, categoryName := range book.Categories {
-			categoryName = strings.TrimSpace(categoryName)
-			if categoryName == "" {
-				continue
-			}
-
-			var categoryID string
-			err = tx.QueryRow(ctx, `
-				SELECT id FROM categories
-				WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
-				LIMIT 1
-			`, categoryName).Scan(&categoryID)
-
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					stats.UnmatchedCategories++
-					continue
-				}
-				return 0, 0, 0, stats, err
-			}
-
-			_, err = tx.Exec(ctx, `
-				INSERT INTO book_categories (book_id, category_id)
-				VALUES ($1, $2)
-				ON CONFLICT DO NOTHING
-			`, bookID, categoryID)
-			if err != nil {
-				return 0, 0, 0, stats, err
-			}
-
-			matchedCategories++
-		}
-
-		if matchedCategories == 0 {
-			var otherID string
-			fallbackErr := tx.QueryRow(ctx, `
-				SELECT id FROM categories
-				WHERE LOWER(BTRIM(name)) = 'other'
-				LIMIT 1
-			`).Scan(&otherID)
-
-			if fallbackErr == nil {
-				_, err = tx.Exec(ctx, `
-					INSERT INTO book_categories (book_id, category_id)
-					VALUES ($1, $2)
-					ON CONFLICT DO NOTHING
-				`, bookID, otherID)
-				if err != nil {
-					return 0, 0, 0, stats, err
-				}
-			} else if errors.Is(fallbackErr, pgx.ErrNoRows) {
-				stats.InsertedWithoutCategory++
-			} else {
-				return 0, 0, 0, stats, fallbackErr
-			}
+		if err != nil {
+			return 0, 0, 0, stats, err
 		}
 
 		_, err = tx.Exec(ctx, `
@@ -693,12 +732,17 @@ func (s *Store) AdminBulkImportBooksDetailed(
 			ON CONFLICT (book_id)
 			DO UPDATE SET is_visible = TRUE
 		`, bookID)
+
 		if err != nil {
 			return 0, 0, 0, stats, err
 		}
 
 		inserted++
 		total++
+		visible++
+
+		categoryCounts[categoryID]++
+		stats.InsertedByCategory[categoryName]++
 	}
 
 	if err := tx.Commit(ctx); err != nil {

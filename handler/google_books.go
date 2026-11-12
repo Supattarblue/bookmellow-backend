@@ -17,7 +17,6 @@ const (
 	googleBooksURL = "https://www.googleapis.com/books/v1/volumes"
 	bookTarget     = 100
 	minBookYear    = 2019
-	importPages    = 1
 	importPageSize = 40
 )
 
@@ -71,6 +70,14 @@ type HomeExternalBook struct {
 	CoverURL      string   `json:"cover_url"`
 	PublishedYear int      `json:"published_year"`
 	Categories    []string `json:"categories"`
+}
+
+type bulkSearchPlan struct {
+	ThaiQuery    string
+	EnglishQuery string
+	Subject      string
+	Category     string
+	Target       int
 }
 
 func isSupportedBookLanguage(language string) bool {
@@ -357,80 +364,206 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	plans := []bulkSearchPlan{
+		{
+			ThaiQuery:    "นิยายอิงประวัติศาสตร์ ภาษาไทย",
+			EnglishQuery: "historical fiction novels",
+			Subject:      "Historical Fiction",
+			Category:     "Historical Fiction",
+			Target:       5,
+		},
+		{
+			ThaiQuery:    "หนังสือธุรกิจ การบริหาร การตลาด ผู้ประกอบการ ภาษาไทย",
+			EnglishQuery: "business management marketing entrepreneurship books",
+			Subject:      "Business & Economics",
+			Category:     "Business",
+			Target:       5,
+		},
+		{
+			ThaiQuery:    "ชีวประวัติ อัตชีวประวัติ บุคคลสำคัญ ภาษาไทย",
+			EnglishQuery: "biography autobiography memoir books",
+			Subject:      "Biography & Autobiography",
+			Category:     "Biography",
+			Target:       5,
+		},
+		{
+			ThaiQuery:    "นิทาน หนังสือเด็ก วรรณกรรมเยาวชน ภาษาไทย",
+			EnglishQuery: "children's books juvenile fiction",
+			Subject:      "Juvenile Fiction",
+			Category:     "Children",
+			Target:       5,
+		},
+		{
+			ThaiQuery:    "หนังสือการศึกษา การเรียนรู้ การสอน ภาษาไทย",
+			EnglishQuery: "education learning teaching books",
+			Subject:      "Education",
+			Category:     "Education",
+			Target:       5,
+		},
+		{
+			ThaiQuery:    "นิยายวิทยาศาสตร์ ไซไฟ ภาษาไทย",
+			EnglishQuery: "science fiction novels",
+			Subject:      "Science Fiction",
+			Category:     "Science Fiction",
+			Target:       5,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 70*time.Second)
 	defer cancel()
 
-	results, err := h.fetchGoogleBooksForImport(ctx)
+	resultsByPlan := make([][]GoogleBookResult, len(plans))
+	errorsByPlan := make([]string, len(plans))
 
-	if err != nil {
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 6)
+
+	for i, plan := range plans {
+		wg.Add(1)
+
+		go func(index int, currentPlan bulkSearchPlan) {
+			defer wg.Done()
+
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				errorsByPlan[index] = ctx.Err().Error()
+				return
+			}
+			defer func() {
+				<-semaphore
+			}()
+
+			thaiResults, thaiErr := h.fetchGoogleBooksForImport(
+				ctx,
+				currentPlan.ThaiQuery,
+				currentPlan.Subject,
+				"th",
+			)
+
+			englishResults, englishErr := h.fetchGoogleBooksForImport(
+				ctx,
+				currentPlan.EnglishQuery,
+				currentPlan.Subject,
+				"en",
+			)
+
+			combined := make([]GoogleBookResult, 0, 80)
+			seenIDs := make(map[string]bool)
+
+			for _, result := range thaiResults {
+				if seenIDs[result.GoogleBooksID] {
+					continue
+				}
+
+				seenIDs[result.GoogleBooksID] = true
+				combined = append(combined, result)
+			}
+
+			for _, result := range englishResults {
+				if seenIDs[result.GoogleBooksID] {
+					continue
+				}
+
+				seenIDs[result.GoogleBooksID] = true
+				combined = append(combined, result)
+			}
+
+			if len(combined) == 0 {
+				if thaiErr != nil && englishErr != nil {
+					errorsByPlan[index] = fmt.Sprintf(
+						"Thai search: %v; English search: %v",
+						thaiErr,
+						englishErr,
+					)
+					return
+				}
+
+				if thaiErr != nil {
+					errorsByPlan[index] = thaiErr.Error()
+				} else if englishErr != nil {
+					errorsByPlan[index] = englishErr.Error()
+				}
+			}
+
+			resultsByPlan[index] = combined
+		}(i, plan)
+	}
+
+	wg.Wait()
+
+	if ctx.Err() != nil {
 		writeError(
 			w,
-			http.StatusBadGateway,
-			"Unable to find books from Google Books: "+err.Error(),
+			http.StatusGatewayTimeout,
+			"Google Books search timed out. Please try again.",
 		)
 		return
 	}
 
-	importBooks := make([]store.BulkImportBook, 0, len(results))
+	importBooks := make([]store.BulkImportBook, 0, 480)
 	seenBooks := make(map[string]bool)
+	candidateCounts := make(map[string]int)
+	categoryErrors := make(map[string]string)
 
-	rejected := 0
-
-	for _, result := range results {
-		title := strings.TrimSpace(result.Title)
-		author := strings.TrimSpace(result.Author)
-		description := strings.TrimSpace(result.Description)
-		coverURL := normalizeCoverURL(result.CoverURL)
-		language := strings.ToLower(strings.TrimSpace(result.Language))
-
-		if title == "" ||
-			author == "" ||
-			result.GoogleBooksID == "" ||
-			!isSupportedBookLanguage(language) ||
-			!isValidCoverURL(coverURL) ||
-			isPeriodical(title) {
-			rejected++
+	for i, plan := range plans {
+		if errorsByPlan[i] != "" {
+			categoryErrors[plan.Category] = errorsByPlan[i]
 			continue
 		}
 
-		if result.PublishedYear < minBookYear {
-			rejected++
-			continue
+		for _, result := range resultsByPlan[i] {
+			title := strings.TrimSpace(result.Title)
+			author := strings.TrimSpace(result.Author)
+			description := strings.TrimSpace(result.Description)
+			coverURL := normalizeCoverURL(result.CoverURL)
+			language := strings.ToLower(strings.TrimSpace(result.Language))
+
+			if title == "" ||
+				author == "" ||
+				result.GoogleBooksID == "" ||
+				result.PublishedYear < minBookYear ||
+				!isSupportedBookLanguage(language) ||
+				!isValidCoverURL(coverURL) ||
+				isPeriodical(title) {
+				continue
+			}
+
+			if isHorrorBook(result) {
+				continue
+			}
+
+			duplicateKey := makeBookDuplicateKey(title, author)
+
+			if seenBooks[duplicateKey] {
+				continue
+			}
+
+			seenBooks[duplicateKey] = true
+
+			year := result.PublishedYear
+
+			importBooks = append(importBooks, store.BulkImportBook{
+				Title:         title,
+				Author:        author,
+				Description:   description,
+				CoverURL:      coverURL,
+				PublishedYear: &year,
+				Categories:    []string{plan.Category},
+				Language:      language,
+			})
+
+			candidateCounts[plan.Category]++
 		}
-
-		if isHorrorBook(result) {
-			rejected++
-			continue
-		}
-
-		duplicateKey := makeBookDuplicateKey(title, author)
-
-		if seenBooks[duplicateKey] {
-			continue
-		}
-
-		seenBooks[duplicateKey] = true
-
-		year := result.PublishedYear
-
-		importBooks = append(importBooks, store.BulkImportBook{
-			Title:         title,
-			Author:        author,
-			Description:   description,
-			CoverURL:      coverURL,
-			PublishedYear: &year,
-			Categories:    []string{"Other"},
-			Language:      language,
-		})
 	}
 
 	if len(importBooks) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"message":                "No books published after 2018 passed the basic filters",
+			"message":                "No eligible books found",
 			"found":                  0,
-			"rejected":               rejected,
+			"candidate_counts":       candidateCounts,
+			"category_errors":        categoryErrors,
 			"minimum_published_year": minBookYear,
-			"supported_languages":    supportedBookLanguages,
 		})
 		return
 	}
@@ -444,209 +577,117 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"message":                 "Book import completed",
+		"message":                 "Category book import completed",
 		"found":                   len(importBooks),
-		"rejected":                rejected,
 		"inserted":                inserted,
 		"skipped":                 skipped,
+		"candidate_counts":        candidateCounts,
+		"inserted_by_category":    stats.InsertedByCategory,
+		"category_errors":         categoryErrors,
 		"skip_reasons":            stats,
 		"total_books_in_database": total,
 		"visible_catalog_target":  bookTarget,
 		"minimum_published_year":  minBookYear,
-		"supported_languages":     supportedBookLanguages,
 	})
 }
 
 func (h *Handler) fetchGoogleBooksForImport(
 	ctx context.Context,
+	query string,
+	subject string,
+	language string,
 ) ([]GoogleBookResult, error) {
-	type searchTask struct {
-		language string
-		query    string
-		page     int
+	searchQuery := strings.TrimSpace(query)
+
+	if subject != "" {
+		searchQuery += " subject:" + subject
 	}
 
-	languageQueries := map[string]string{
-		"th": "หนังสือ",
-		"en": "book",
-		"ja": "本",
-		"ko": "책",
+	params := url.Values{}
+	params.Set("q", searchQuery)
+	params.Set("maxResults", fmt.Sprintf("%d", importPageSize))
+	params.Set("printType", "books")
+	params.Set("orderBy", "newest")
+	params.Set("langRestrict", language)
+	params.Set("key", h.GoogleBooksAPIKey)
+
+	requestURL := googleBooksURL + "?" + params.Encode()
+
+	requestCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodGet,
+		requestURL,
+		nil,
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	tasks := make([]searchTask, 0, len(supportedBookLanguages)*importPages)
+	client := &http.Client{Timeout: 12 * time.Second}
 
-	for _, language := range supportedBookLanguages {
-		for page := 0; page < importPages; page++ {
-			tasks = append(tasks, searchTask{
-				language: language,
-				query:    languageQueries[language],
-				page:     page,
-			})
-		}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"Google Books API returned status %d for language %s",
+			resp.StatusCode,
+			language,
+		)
 	}
 
-	pageResults := make([][]GoogleBookResult, len(tasks))
+	var googleResponse GoogleBooksResponse
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
+	if err := json.NewDecoder(resp.Body).Decode(&googleResponse); err != nil {
+		return nil, err
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	results := make([]GoogleBookResult, 0, len(googleResponse.Items))
 
-	successfulRequests := 0
-	var lastErr error
+	for _, item := range googleResponse.Items {
+		info := item.VolumeInfo
 
-	semaphore := make(chan struct{}, 2)
+		title := strings.TrimSpace(info.Title)
+		author := strings.Join(info.Authors, ", ")
+		coverURL := selectBestCover(info)
+		bookLanguage := strings.ToLower(strings.TrimSpace(info.Language))
+		year := extractPublishedYear(info.PublishedDate)
 
-	for i, task := range tasks {
-		if ctx.Err() != nil {
-			break
-		}
-
-		semaphore <- struct{}{}
-		wg.Add(1)
-
-		go func(index int, task searchTask) {
-			defer wg.Done()
-			defer func() {
-				<-semaphore
-			}()
-
-			requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-
-			params := url.Values{}
-			params.Set("q", task.query)
-			params.Set("maxResults", fmt.Sprintf("%d", importPageSize))
-			params.Set("startIndex", fmt.Sprintf("%d", task.page*importPageSize))
-			params.Set("printType", "books")
-			params.Set("orderBy", "newest")
-			params.Set("langRestrict", task.language)
-			params.Set("key", h.GoogleBooksAPIKey)
-
-			requestURL := googleBooksURL + "?" + params.Encode()
-
-			req, err := http.NewRequestWithContext(
-				requestCtx,
-				http.MethodGet,
-				requestURL,
-				nil,
-			)
-
-			if err != nil {
-				mu.Lock()
-				lastErr = err
-				mu.Unlock()
-				return
-			}
-
-			resp, err := client.Do(req)
-			if err != nil {
-				mu.Lock()
-				lastErr = err
-				mu.Unlock()
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				mu.Lock()
-				lastErr = fmt.Errorf(
-					"Google Books API returned status %d for language %s page %d",
-					resp.StatusCode,
-					task.language,
-					task.page,
-				)
-				mu.Unlock()
-				return
-			}
-
-			var googleResponse GoogleBooksResponse
-
-			if err := json.NewDecoder(resp.Body).Decode(&googleResponse); err != nil {
-				mu.Lock()
-				lastErr = err
-				mu.Unlock()
-				return
-			}
-
-			results := make([]GoogleBookResult, 0, len(googleResponse.Items))
-
-			for _, item := range googleResponse.Items {
-				info := item.VolumeInfo
-
-				title := strings.TrimSpace(info.Title)
-				author := strings.Join(info.Authors, ", ")
-				coverURL := selectBestCover(info)
-				bookLanguage := strings.ToLower(strings.TrimSpace(info.Language))
-				year := extractPublishedYear(info.PublishedDate)
-
-				if title == "" ||
-					author == "" ||
-					item.ID == "" ||
-					bookLanguage != task.language ||
-					year < minBookYear ||
-					!isValidCoverURL(coverURL) ||
-					isPeriodical(title) {
-					continue
-				}
-
-				result := GoogleBookResult{
-					GoogleBooksID: item.ID,
-					Title:         title,
-					Author:        author,
-					Authors:       info.Authors,
-					Description:   strings.TrimSpace(info.Description),
-					CoverURL:      coverURL,
-					PublishedDate: info.PublishedDate,
-					PublishedYear: year,
-					Language:      bookLanguage,
-					Categories:    info.Categories,
-				}
-
-				if isHorrorBook(result) {
-					continue
-				}
-
-				results = append(results, result)
-			}
-
-			pageResults[index] = results
-
-			mu.Lock()
-			successfulRequests++
-			mu.Unlock()
-		}(i, task)
-	}
-
-	wg.Wait()
-
-	allResults := make([]GoogleBookResult, 0)
-	seenIDs := make(map[string]bool)
-
-	for _, page := range pageResults {
-		for _, result := range page {
-			if seenIDs[result.GoogleBooksID] {
-				continue
-			}
-
-			seenIDs[result.GoogleBooksID] = true
-			allResults = append(allResults, result)
-		}
-	}
-
-	if successfulRequests == 0 {
-		if lastErr != nil {
-			return nil, lastErr
+		if title == "" ||
+			author == "" ||
+			item.ID == "" ||
+			bookLanguage != language ||
+			year < minBookYear ||
+			!isValidCoverURL(coverURL) ||
+			isPeriodical(title) {
+			continue
 		}
 
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		result := GoogleBookResult{
+			GoogleBooksID: item.ID,
+			Title:         title,
+			Author:        author,
+			Authors:       info.Authors,
+			Description:   strings.TrimSpace(info.Description),
+			CoverURL:      coverURL,
+			PublishedDate: info.PublishedDate,
+			PublishedYear: year,
+			Language:      bookLanguage,
+			Categories:    info.Categories,
 		}
 
-		return nil, fmt.Errorf("no successful Google Books search")
+		if isHorrorBook(result) {
+			continue
+		}
+
+		results = append(results, result)
 	}
 
-	return allResults, nil
+	return results, nil
 }
