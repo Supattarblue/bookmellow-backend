@@ -13,11 +13,9 @@ import (
 const BookCatalogTarget = 100
 
 type AdminStats struct {
-	Books        int `json:"books"`
-	VisibleBooks int `json:"visible_books"`
-	HiddenBooks  int `json:"hidden_books"`
-	Members      int `json:"members"`
-	Admins       int `json:"admins"`
+	Books   int `json:"books"`
+	Members int `json:"members"`
+	Admins  int `json:"admins"`
 }
 
 func (s *Store) AdminDashboard(ctx context.Context) (*AdminStats, error) {
@@ -25,7 +23,6 @@ func (s *Store) AdminDashboard(ctx context.Context) (*AdminStats, error) {
 
 	err := s.DB.QueryRow(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM books),
 			(
 				SELECT COUNT(*)
 				FROM books b
@@ -37,15 +34,12 @@ func (s *Store) AdminDashboard(ctx context.Context) (*AdminStats, error) {
 			(SELECT COUNT(*) FROM users WHERE role = 'admin')
 	`).Scan(
 		&stats.Books,
-		&stats.VisibleBooks,
 		&stats.Members,
 		&stats.Admins,
 	)
 	if err != nil {
 		return nil, err
 	}
-
-	stats.HiddenBooks = stats.Books - stats.VisibleBooks
 
 	return &stats, nil
 }
