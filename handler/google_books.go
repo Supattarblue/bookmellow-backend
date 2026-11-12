@@ -52,6 +52,114 @@ type GoogleBookResult struct {
 	Categories    []string `json:"google_categories"`
 }
 
+type bulkSearchPlan struct {
+	Query      string
+	Language   string
+	Subject    string
+	Categories []string
+}
+
+// HomeExternalBook คือข้อมูลหนังสือจาก Google Books
+// ไม่ได้บันทึกลง Supabase
+type HomeExternalBook struct {
+	ID            string   `json:"id"`
+	Source        string   `json:"source"`
+	Title         string   `json:"title"`
+	Author        string   `json:"author"`
+	Description   string   `json:"description"`
+	CoverURL      string   `json:"cover_url"`
+	PublishedYear int      `json:"published_year"`
+	Categories    []string `json:"categories"`
+}
+
+// normalizeCoverURL ปรับ URL ภาพให้ใช้ HTTPS
+func normalizeCoverURL(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Replace(value, "http://", "https://", 1)
+	value = strings.ReplaceAll(value, "&amp;", "&")
+	return value
+}
+
+// selectBestCover เลือกภาพปกจากความละเอียดสูงสุดที่ Google Books มีให้
+func selectBestCover(info GoogleBookVolumeInfo) string {
+	candidates := []string{
+		info.ImageLinks.ExtraLarge,
+		info.ImageLinks.Large,
+		info.ImageLinks.Medium,
+		info.ImageLinks.Small,
+		info.ImageLinks.Thumbnail,
+		info.ImageLinks.SmallThumbnail,
+	}
+
+	for _, candidate := range candidates {
+		candidate = normalizeCoverURL(candidate)
+
+		if isValidCoverURL(candidate) {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+func isValidCoverURL(value string) bool {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil {
+		return false
+	}
+
+	return parsed.Scheme == "https" && parsed.Host != ""
+}
+
+func isPeriodical(title string) bool {
+	title = strings.ToLower(strings.TrimSpace(title))
+
+	keywords := []string{
+		"นิตยสาร",
+		"หนังสือพิมพ์",
+		"รายสัปดาห์",
+		"รายเดือน",
+		"วารสาร",
+		"ฉบับที่",
+		"ประจำวันที่",
+		"magazine",
+		"newspaper",
+		"weekly",
+		"monthly journal",
+		"periodical",
+		"newsletter",
+	}
+
+	for _, keyword := range keywords {
+		if strings.Contains(title, keyword) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractPublishedYear(date string) int {
+	date = strings.TrimSpace(date)
+
+	if len(date) < 4 {
+		return 0
+	}
+
+	var year int
+
+	if _, err := fmt.Sscanf(date[:4], "%d", &year); err != nil {
+		return 0
+	}
+
+	if year < 1 || year > 9999 {
+		return 0
+	}
+
+	return year
+}
+
+// AdminSearchGoogleBooks ค้นหาหนังสือจาก Google Books สำหรับ Admin
 func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -167,111 +275,166 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func normalizeCoverURL(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.Replace(value, "http://", "https://", 1)
-	value = strings.ReplaceAll(value, "&amp;", "&")
+// DiscoverBooks ดึงหนังสือจาก Google Books สำหรับหน้า Home
+// ไม่บันทึกหนังสือลงฐานข้อมูล
+func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
+	if h.GoogleBooksAPIKey == "" {
+		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
+		return
+	}
 
-	// ขอภาพขนาดใหญ่ขึ้นจาก Google Books เมื่อ URL รองรับพารามิเตอร์นี้
-	if value != "" {
-		parsed, err := url.Parse(value)
-		if err == nil {
-			query := parsed.Query()
-			query.Set("zoom", "2")
-			parsed.RawQuery = query.Encode()
-			value = parsed.String()
+	plans := []bulkSearchPlan{
+		{
+			Query:      "นิยายรัก วัยรุ่น",
+			Language:   "th",
+			Subject:    "Romance",
+			Categories: []string{"Romance"},
+		},
+		{
+			Query:      "มังงะ การ์ตูน",
+			Language:   "th",
+			Subject:    "Comics & Graphic Novels",
+			Categories: []string{"Manga"},
+		},
+		{
+			Query:      "หนังสือฮีลใจ",
+			Language:   "th",
+			Subject:    "Fiction",
+			Categories: []string{"Fiction"},
+		},
+		{
+			Query:      "young adult romance novels",
+			Language:   "en",
+			Subject:    "Romance",
+			Categories: []string{"Romance"},
+		},
+		{
+			Query:      "manga graphic novels",
+			Language:   "en",
+			Subject:    "Comics & Graphic Novels",
+			Categories: []string{"Manga"},
+		},
+		{
+			Query:      "fantasy fiction novels",
+			Language:   "en",
+			Subject:    "Fantasy",
+			Categories: []string{"Fantasy"},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+
+	resultsByPlan := make([][]GoogleBookResult, len(plans))
+	errorsByPlan := make([]error, len(plans))
+
+	semaphore := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+
+	for i, plan := range plans {
+		wg.Add(1)
+
+		go func(index int, currentPlan bulkSearchPlan) {
+			defer wg.Done()
+
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				errorsByPlan[index] = ctx.Err()
+				return
+			}
+
+			defer func() {
+				<-semaphore
+			}()
+
+			results, err := h.fetchGoogleBooksForImport(
+				ctx,
+				currentPlan.Query,
+				currentPlan.Language,
+				currentPlan.Subject,
+			)
+
+			resultsByPlan[index] = results
+			errorsByPlan[index] = err
+		}(i, plan)
+	}
+
+	wg.Wait()
+
+	books := make([]HomeExternalBook, 0, 100)
+	seen := make(map[string]bool)
+	successfulSearches := 0
+
+	for i, plan := range plans {
+		if errorsByPlan[i] != nil {
+			continue
+		}
+
+		successfulSearches++
+
+		for _, result := range resultsByPlan[i] {
+			if result.GoogleBooksID == "" {
+				continue
+			}
+
+			title := strings.TrimSpace(result.Title)
+			author := strings.TrimSpace(result.Author)
+			coverURL := normalizeCoverURL(result.CoverURL)
+
+			if title == "" || author == "" || !isValidCoverURL(coverURL) {
+				continue
+			}
+
+			key := strings.ToLower(
+				strings.Join(strings.Fields(title), " ") + "|" +
+					strings.Join(strings.Fields(author), " "),
+			)
+
+			if seen[key] {
+				continue
+			}
+
+			seen[key] = true
+
+			categories := result.Categories
+			if len(categories) == 0 {
+				categories = plan.Categories
+			}
+
+			books = append(books, HomeExternalBook{
+				ID:            "google_" + result.GoogleBooksID,
+				Source:        "google_books",
+				Title:         title,
+				Author:        author,
+				Description:   result.Description,
+				CoverURL:      coverURL,
+				PublishedYear: result.PublishedYear,
+				Categories:    categories,
+			})
+
+			if len(books) >= 100 {
+				break
+			}
+		}
+
+		if len(books) >= 100 {
+			break
 		}
 	}
 
-	return value
+	if successfulSearches == 0 {
+		writeError(w, http.StatusBadGateway, "Unable to retrieve books from Google Books")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data":  books,
+		"total": len(books),
+	})
 }
 
-// เลือกภาพปกจากความละเอียดสูงสุดที่ Google Books ส่งมาให้
-func selectBestCover(info GoogleBookVolumeInfo) string {
-	candidates := []string{
-		info.ImageLinks.ExtraLarge,
-		info.ImageLinks.Large,
-		info.ImageLinks.Medium,
-		info.ImageLinks.Small,
-		info.ImageLinks.Thumbnail,
-		info.ImageLinks.SmallThumbnail,
-	}
-
-	for _, candidate := range candidates {
-		candidate = normalizeCoverURL(candidate)
-
-		if isValidCoverURL(candidate) {
-			return candidate
-		}
-	}
-
-	return ""
-}
-
-func isValidCoverURL(value string) bool {
-	parsed, err := url.ParseRequestURI(value)
-	if err != nil {
-		return false
-	}
-
-	return parsed.Scheme == "https" && parsed.Host != ""
-}
-
-func isPeriodical(title string) bool {
-	title = strings.ToLower(strings.TrimSpace(title))
-
-	keywords := []string{
-		"นิตยสาร",
-		"หนังสือพิมพ์",
-		"รายสัปดาห์",
-		"รายเดือน",
-		"วารสาร",
-		"ฉบับที่",
-		"ประจำวันที่",
-		"magazine",
-		"newspaper",
-		"weekly",
-		"monthly journal",
-		"periodical",
-		"newsletter",
-	}
-
-	for _, keyword := range keywords {
-		if strings.Contains(title, keyword) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func extractPublishedYear(date string) int {
-	date = strings.TrimSpace(date)
-
-	if len(date) < 4 {
-		return 0
-	}
-
-	var year int
-
-	if _, err := fmt.Sscanf(date[:4], "%d", &year); err != nil {
-		return 0
-	}
-
-	if year < 1 || year > 9999 {
-		return 0
-	}
-
-	return year
-}
-
-type bulkSearchPlan struct {
-	Query      string
-	Language   string
-	Subject    string
-	Categories []string
-}
-
+// AdminBulkImportBooks นำเข้าหนังสือจาก Google Books ลงฐานข้อมูล
 func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -526,6 +689,7 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// fetchGoogleBooksForImport ค้นหาหนังสือจาก Google Books
 func (h *Handler) fetchGoogleBooksForImport(
 	ctx context.Context,
 	query string,
@@ -551,7 +715,12 @@ func (h *Handler) fetchGoogleBooksForImport(
 	requestCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, requestURL, nil)
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodGet,
+		requestURL,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +734,10 @@ func (h *Handler) fetchGoogleBooksForImport(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Google Books API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf(
+			"Google Books API returned status %d",
+			resp.StatusCode,
+		)
 	}
 
 	var googleResponse GoogleBooksResponse
@@ -605,10 +777,4 @@ func (h *Handler) fetchGoogleBooksForImport(
 	}
 
 	return results, nil
-}
-func normalizeCoverURL(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.Replace(value, "http://", "https://", 1)
-	value = strings.ReplaceAll(value, "&amp;", "&")
-	return value
 }
