@@ -1,3 +1,4 @@
+
 package handler
 
 import (
@@ -48,7 +49,6 @@ type GoogleBookResult struct {
 	Categories    []string `json:"google_categories"`
 }
 
-// AdminSearchGoogleBooks searches books from Google Books API.
 func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -101,20 +101,13 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		requestURL,
-		nil,
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		internal(w, err)
 		return
 	}
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -139,7 +132,6 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 
 	for _, item := range googleResponse.Items {
 		info := item.VolumeInfo
-
 		title := strings.TrimSpace(info.Title)
 		author := strings.Join(info.Authors, ", ")
 
@@ -241,8 +233,6 @@ func extractPublishedYear(date string) int {
 	return year
 }
 
-// Bulk import
-
 type bulkSearchPlan struct {
 	Query      string
 	Language   string
@@ -257,7 +247,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	plans := []bulkSearchPlan{
-		// Thai books
 		{
 			Query:      "มังงะ การ์ตูน",
 			Language:   "th",
@@ -312,8 +301,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 			Subject:    "Self-Help",
 			Categories: []string{"Self-Help"},
 		},
-
-		// Foreign books
 		{
 			Query:      "manga graphic novels",
 			Language:   "en",
@@ -358,7 +345,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// จำกัดเวลาค้นหาทั้งหมด และจำกัดงานพร้อมกันไม่เกิน 4 คำค้นหา
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 
@@ -431,10 +417,7 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 			description := strings.TrimSpace(result.Description)
 			coverURL := normalizeCoverURL(result.CoverURL)
 
-			if title == "" ||
-				author == "" ||
-				description == "" ||
-				!isValidCoverURL(coverURL) {
+			if title == "" || author == "" || description == "" || !isValidCoverURL(coverURL) {
 				continue
 			}
 
@@ -472,7 +455,19 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ให้ Store ตรวจหนังสือเดิม หนังสือซ้ำ และเพดาน 100 เล่ม
+	// นับจำนวนหนังสือที่ผ่านการกรอง แยกตามภาษาที่ใช้ค้นหา
+	thaiCandidates := 0
+	foreignCandidates := 0
+
+	for _, book := range importBooks {
+		switch strings.ToLower(book.Language) {
+		case "th":
+			thaiCandidates++
+		case "en":
+			foreignCandidates++
+		}
+	}
+
 	inserted, skipped, total, err := h.Store.AdminBulkImportBooks(
 		r.Context(),
 		importBooks,
@@ -491,6 +486,8 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		"message":             "Bulk import completed",
 		"successful_searches": successfulSearches,
 		"found":               len(importBooks),
+		"thai_candidates":     thaiCandidates,
+		"foreign_candidates":  foreignCandidates,
 		"inserted":            inserted,
 		"skipped":             skipped,
 		"total":               total,
@@ -523,19 +520,12 @@ func (h *Handler) fetchGoogleBooksForImport(
 	requestCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(
-		requestCtx,
-		http.MethodGet,
-		requestURL,
-		nil,
-	)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	client := &http.Client{
-		Timeout: 12 * time.Second,
-	}
+	client := &http.Client{Timeout: 12 * time.Second}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -544,10 +534,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"Google Books API returned status %d",
-			resp.StatusCode,
-		)
+		return nil, fmt.Errorf("Google Books API returned status %d", resp.StatusCode)
 	}
 
 	var googleResponse GoogleBooksResponse
@@ -560,7 +547,6 @@ func (h *Handler) fetchGoogleBooksForImport(
 
 	for _, item := range googleResponse.Items {
 		info := item.VolumeInfo
-
 		title := strings.TrimSpace(info.Title)
 		author := strings.Join(info.Authors, ", ")
 
@@ -571,9 +557,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 
 		coverURL = normalizeCoverURL(coverURL)
 
-		if title == "" ||
-			strings.TrimSpace(author) == "" ||
-			!isValidCoverURL(coverURL) {
+		if title == "" || strings.TrimSpace(author) == "" || !isValidCoverURL(coverURL) {
 			continue
 		}
 
