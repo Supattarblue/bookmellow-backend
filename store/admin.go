@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const BookCatalogTarget = 100
+
 type AdminStats struct {
 	Books   int `json:"books"`
 	Members int `json:"members"`
@@ -177,8 +179,9 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 	if err != nil {
 		return err
 	}
-	if visible >= 88 {
-		return errors.New("book catalog has reached the 88-book limit")
+
+	if visible >= BookCatalogTarget {
+		return errors.New("book catalog has reached the 100-book limit")
 	}
 
 	err = tx.QueryRow(ctx, `
@@ -357,7 +360,7 @@ func (s *Store) AdminBulkCreateBooks(
 		return 0, 0, err
 	}
 
-	remaining := 88 - visible
+	remaining := BookCatalogTarget - visible
 	if remaining <= 0 {
 		return 0, len(items), nil
 	}
@@ -449,7 +452,7 @@ type BulkImportBook struct {
 
 type BulkImportStats struct {
 	SkippedLimit            int `json:"limit_reached"`
-	SkippedNotThai          int `json:"not_thai"`
+	SkippedNotThai          int `json:"unsupported_language_or_title"`
 	SkippedMissingFields    int `json:"missing_required_fields"`
 	SkippedInvalidCover     int `json:"invalid_cover_url"`
 	SkippedDuplicate        int `json:"duplicate"`
@@ -501,9 +504,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		return 0, 0, 0, stats, err
 	}
 
-	const target = 88
-	remaining := target - visible
-
+	remaining := BookCatalogTarget - visible
 	if remaining <= 0 {
 		if err := tx.Commit(ctx); err != nil {
 			return 0, 0, 0, stats, err
@@ -525,16 +526,29 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		book.Author = strings.TrimSpace(book.Author)
 		book.Description = strings.TrimSpace(book.Description)
 		book.CoverURL = strings.TrimSpace(book.CoverURL)
+		book.Language = strings.ToLower(strings.TrimSpace(book.Language))
 
-		if !strings.EqualFold(strings.TrimSpace(book.Language), "th") ||
-			!hasThaiScript(book.Title) {
-			stats.SkippedNotThai++
+		if book.Title == "" || book.Author == "" || book.CoverURL == "" {
+			stats.SkippedMissingFields++
 			skipped++
 			continue
 		}
 
-		if book.Title == "" || book.Author == "" || book.CoverURL == "" {
-			stats.SkippedMissingFields++
+		switch book.Language {
+		case "th":
+			if !hasThaiScript(book.Title) {
+				stats.SkippedNotThai++
+				skipped++
+				continue
+			}
+		case "en":
+			if !hasLatinScript(book.Title) {
+				stats.SkippedNotThai++
+				skipped++
+				continue
+			}
+		default:
+			stats.SkippedNotThai++
 			skipped++
 			continue
 		}
@@ -671,6 +685,15 @@ func (s *Store) AdminReplaceNonThaiBooks(
 func hasThaiScript(value string) bool {
 	for _, r := range value {
 		if r >= '\u0E00' && r <= '\u0E7F' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLatinScript(value string) bool {
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
 			return true
 		}
 	}
