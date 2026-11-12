@@ -190,15 +190,30 @@ func isAdultRomance(text string) bool {
 		"hot and steamy", "graphic sex", "adult romance",
 		"สำหรับผู้ใหญ่", "เนื้อหาทางเพศ", "ฉากร่วมเพศ",
 		"อีโรติก", "อิโรติก", "เรท 18", "18+",
+		"nc18", "nc-18", "20+", "ฉากร่วมรัก",
+		"ฉากเลิฟซีน", "เนื้อหา 20+",
 	})
 }
 
-// ตรวจคุณภาพพื้นฐานโดยไม่บังคับว่าต้องมีคำตรงกับชื่อหมวดหมู่
-// เพราะคำอธิบายหนังสือจริงอาจไม่ได้ใช้ keyword ตามหมวดที่ค้นหา
+func cleanBookDescription(description string) string {
+	description = strings.TrimSpace(description)
+
+	lower := strings.ToLower(description)
+	if index := strings.Index(lower, "keyword:"); index >= 0 {
+		description = strings.TrimSpace(description[:index])
+	}
+
+	if index := strings.Index(description, "++++++++++++++++++++"); index >= 0 {
+		description = strings.TrimSpace(description[:index])
+	}
+
+	return description
+}
+
 func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 	title := strings.TrimSpace(result.Title)
 	author := strings.TrimSpace(result.Author)
-	description := strings.TrimSpace(result.Description)
+	description := cleanBookDescription(result.Description)
 
 	if title == "" || author == "" || result.GoogleBooksID == "" {
 		return false
@@ -216,8 +231,6 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 		return false
 	}
 
-	// ต้องมีคำอธิบายที่มีเนื้อหาจริง ไม่ใช่ keyword อย่างเดียว
-	description = cleanBookDescription(description)
 	if len([]rune(description)) < 35 || !hasThaiText(description) {
 		return false
 	}
@@ -227,21 +240,6 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 	}
 
 	return true
-}
-
-func cleanBookDescription(description string) string {
-	description = strings.TrimSpace(description)
-
-	lower := strings.ToLower(description)
-	if index := strings.Index(lower, "keyword:"); index >= 0 {
-		description = strings.TrimSpace(description[:index])
-	}
-
-	if index := strings.Index(description, "++++++++++++++++++++"); index >= 0 {
-		description = strings.TrimSpace(description[:index])
-	}
-
-	return description
 }
 
 func normalizeDiscoverCategory(categories []string, result GoogleBookResult) []string {
@@ -267,15 +265,6 @@ func normalizeDiscoverCategory(categories []string, result GoogleBookResult) []s
 		category := strings.TrimSpace(categories[0])
 		if allowed[category] {
 			return []string{category}
-		}
-
-		switch strings.ToLower(category) {
-		case "bl", "gl", "feel-good":
-			return []string{"Romance"}
-		case "manga", "comics & graphic novels":
-			return []string{"Young Adult"}
-		case "psychology":
-			return []string{"Self-Help"}
 		}
 	}
 
@@ -313,6 +302,36 @@ func normalizeDiscoverCategory(categories []string, result GoogleBookResult) []s
 	default:
 		return []string{"Young Adult"}
 	}
+}
+
+func isAllowedDiscoverCategory(category string) bool {
+	switch category {
+	case "Adventure", "Biography", "Business", "Children",
+		"Education", "Fantasy", "Historical Fiction", "Horror",
+		"Mystery", "Poetry", "Romance", "Science Fiction",
+		"Self-Help", "Thriller", "Young Adult":
+		return true
+	default:
+		return false
+	}
+}
+
+func getPlanCategory(plan bulkSearchPlan, result GoogleBookResult) string {
+	// ใช้หมวดหมู่จากคำค้นเป็นหลัก
+	// ไม่ใช้ Google Categories ก่อน เพราะ Google มักจัดหมวดหมู่กว้างหรือคลาดเคลื่อน
+	if len(plan.Categories) > 0 {
+		category := strings.TrimSpace(plan.Categories[0])
+		if isAllowedDiscoverCategory(category) {
+			return category
+		}
+	}
+
+	categories := normalizeDiscoverCategory(result.Categories, result)
+	if len(categories) > 0 && isAllowedDiscoverCategory(categories[0]) {
+		return categories[0]
+	}
+
+	return "Young Adult"
 }
 
 func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request) {
@@ -434,38 +453,51 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ใช้คำค้นหลายรูปแบบ และไม่ใส่ subject จำกัดผลลัพธ์
 	plans := []bulkSearchPlan{
 		{Query: "นิยายรักไทย", Language: "th", Categories: []string{"Romance"}},
 		{Query: "นิยายโรแมนติกไทย", Language: "th", Categories: []string{"Romance"}},
 		{Query: "นิยายความรัก ภาษาไทย", Language: "th", Categories: []string{"Romance"}},
 		{Query: "นิยายวายไทย", Language: "th", Categories: []string{"Romance"}},
+
 		{Query: "นิยายแฟนตาซีไทย", Language: "th", Categories: []string{"Fantasy"}},
 		{Query: "นิยายกำลังภายใน แฟนตาซี", Language: "th", Categories: []string{"Fantasy"}},
+
 		{Query: "นิยายสืบสวนไทย", Language: "th", Categories: []string{"Mystery"}},
 		{Query: "นิยายฆาตกรรม ปริศนา", Language: "th", Categories: []string{"Mystery"}},
+
 		{Query: "นิยายวัยรุ่นไทย", Language: "th", Categories: []string{"Young Adult"}},
 		{Query: "วรรณกรรมเยาวชนไทย", Language: "th", Categories: []string{"Young Adult"}},
+
 		{Query: "หนังสือจิตวิทยาไทย", Language: "th", Categories: []string{"Self-Help"}},
 		{Query: "หนังสือพัฒนาตนเองไทย", Language: "th", Categories: []string{"Self-Help"}},
+
 		{Query: "หนังสือธุรกิจไทย", Language: "th", Categories: []string{"Business"}},
 		{Query: "หนังสือการเงิน การลงทุน ภาษาไทย", Language: "th", Categories: []string{"Business"}},
+
 		{Query: "ชีวประวัติบุคคลสำคัญไทย", Language: "th", Categories: []string{"Biography"}},
 		{Query: "อัตชีวประวัติ ภาษาไทย", Language: "th", Categories: []string{"Biography"}},
+
 		{Query: "นิทานเด็กไทย", Language: "th", Categories: []string{"Children"}},
 		{Query: "หนังสือสำหรับเด็ก ภาษาไทย", Language: "th", Categories: []string{"Children"}},
+
 		{Query: "นิยายสยองขวัญไทย", Language: "th", Categories: []string{"Horror"}},
 		{Query: "เรื่องผีไทย หนังสือ", Language: "th", Categories: []string{"Horror"}},
+
 		{Query: "นิยายวิทยาศาสตร์ไทย", Language: "th", Categories: []string{"Science Fiction"}},
 		{Query: "นิยายไซไฟ ภาษาไทย", Language: "th", Categories: []string{"Science Fiction"}},
+
 		{Query: "นิยายผจญภัยไทย", Language: "th", Categories: []string{"Adventure"}},
 		{Query: "วรรณกรรมผจญภัย ภาษาไทย", Language: "th", Categories: []string{"Adventure"}},
+
 		{Query: "นิยายอิงประวัติศาสตร์ไทย", Language: "th", Categories: []string{"Historical Fiction"}},
 		{Query: "วรรณกรรมประวัติศาสตร์ ภาษาไทย", Language: "th", Categories: []string{"Historical Fiction"}},
+
 		{Query: "บทกวีไทย กวีนิพนธ์", Language: "th", Categories: []string{"Poetry"}},
 		{Query: "รวมบทกลอน ภาษาไทย", Language: "th", Categories: []string{"Poetry"}},
+
 		{Query: "หนังสือการศึกษา ภาษาไทย", Language: "th", Categories: []string{"Education"}},
 		{Query: "หนังสือความรู้ ภาษาไทย", Language: "th", Categories: []string{"Education"}},
+
 		{Query: "นิยายระทึกขวัญไทย", Language: "th", Categories: []string{"Thriller"}},
 		{Query: "หนังสือ thriller ภาษาไทย", Language: "th", Categories: []string{"Thriller"}},
 	}
@@ -525,11 +557,6 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	books := make([]HomeExternalBook, 0, 100)
-	seenIDs := make(map[string]bool)
-	seenTitles := make(map[string]bool)
-
-	// เป้าหมายต่อหมวดหมู่ เพื่อไม่ให้ผลลัพธ์กระจุกอยู่หมวดเดียว
 	categoryTargets := map[string]int{
 		"Romance":            12,
 		"Fantasy":            8,
@@ -548,15 +575,12 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		"Thriller":           7,
 	}
 
-	categoryCounts := make(map[string]int)
-
-	// เก็บผู้สมัครที่ผ่านการตรวจพื้นฐานก่อน
 	type discoverCandidate struct {
 		result   GoogleBookResult
 		category string
 	}
 
-	candidates := make([]discoverCandidate, 0, 300)
+	candidates := make([]discoverCandidate, 0, 500)
 
 	for i, plan := range plans {
 		if errorsByPlan[i] != nil {
@@ -568,11 +592,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			categoryList := normalizeDiscoverCategory(plan.Categories, result)
-			category := "Young Adult"
-			if len(categoryList) > 0 {
-				category = categoryList[0]
-			}
+			category := getPlanCategory(plan, result)
 
 			candidates = append(candidates, discoverCandidate{
 				result:   result,
@@ -580,6 +600,11 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+
+	books := make([]HomeExternalBook, 0, 100)
+	seenIDs := make(map[string]bool)
+	seenTitles := make(map[string]bool)
+	categoryCounts := make(map[string]int)
 
 	addCandidate := func(candidate discoverCandidate) {
 		if len(books) >= 100 {
@@ -592,11 +617,25 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		description := cleanBookDescription(result.Description)
 		coverURL := normalizeCoverURL(result.CoverURL)
 		googleID := strings.TrimSpace(result.GoogleBooksID)
+		category := candidate.category
 
-		if title == "" || author == "" || googleID == "" ||
-			len([]rune(description)) < 35 ||
+		if title == "" || author == "" || googleID == "" {
+			return
+		}
+
+		if !isAllowedDiscoverCategory(category) {
+			return
+		}
+
+		if len([]rune(description)) < 35 ||
 			!hasThaiText(description) ||
 			!isValidCoverURL(coverURL) {
+			return
+		}
+
+		if isAdultRomance(title+" "+description) ||
+			isLowQualityDiscoverBook(result) ||
+			isPeriodical(title) {
 			return
 		}
 
@@ -611,11 +650,6 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 
 		if seenTitles[key] {
 			return
-		}
-
-		category := candidate.category
-		if categoryTargets[category] == 0 {
-			category = "Young Adult"
 		}
 
 		seenIDs[googleID] = true
@@ -634,27 +668,26 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// รอบแรก เติมตามเป้าหมายของแต่ละหมวด
+	// รอบแรก: เติมตามโควตาของแต่ละหมวด
 	for _, candidate := range candidates {
 		if len(books) >= 100 {
 			break
 		}
 
-		if categoryCounts[candidate.category] >= categoryTargets[candidate.category] {
+		target := categoryTargets[candidate.category]
+		if target == 0 {
+			continue
+		}
+
+		if categoryCounts[candidate.category] >= target {
 			continue
 		}
 
 		addCandidate(candidate)
 	}
 
-	// รอบสอง หากบางหมวดค้นหาได้น้อย ให้ใช้หนังสือที่ผ่านเกณฑ์จากหมวดอื่นเติม
-	for _, candidate := range candidates {
-		if len(books) >= 100 {
-			break
-		}
-
-		addCandidate(candidate)
-	}
+	// ไม่เติมเกินโควตาด้วยหนังสือจากหมวดอื่น
+	// เพื่อไม่ให้จำนวนแต่ละหมวดผิดจากที่กำหนด
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data":                books,
@@ -666,7 +699,6 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ค้นหาหนึ่งคำค้นจาก Google Books
 func (h *Handler) fetchGoogleBooksForDiscover(
 	ctx context.Context,
 	query string,
@@ -675,7 +707,6 @@ func (h *Handler) fetchGoogleBooksForDiscover(
 ) ([]GoogleBookResult, error) {
 	searchQuery := query
 
-	// Discover ใช้ subject ว่างเพื่อไม่จำกัดผลลัพธ์มากเกินไป
 	if subject != "" {
 		searchQuery += " subject:" + subject
 	}
@@ -739,8 +770,6 @@ func (h *Handler) fetchGoogleBooksForDiscover(
 			continue
 		}
 
-		// ยอมรับหนังสือที่ Google ระบุภาษาไทย
-		// แม้ชื่อเรื่องเป็นภาษาอังกฤษ หากคำอธิบายเป็นภาษาไทย
 		if language != "" && language != "th" {
 			continue
 		}
