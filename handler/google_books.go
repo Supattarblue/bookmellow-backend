@@ -61,8 +61,6 @@ type bulkSearchPlan struct {
 	Target     int
 }
 
-// HomeExternalBook คือข้อมูลหนังสือจาก Google Books
-// ไม่ได้บันทึกลง Supabase
 type HomeExternalBook struct {
 	ID            string   `json:"id"`
 	Source        string   `json:"source"`
@@ -74,7 +72,6 @@ type HomeExternalBook struct {
 	Categories    []string `json:"categories"`
 }
 
-// normalizeCoverURL ปรับ URL ภาพให้ใช้ HTTPS
 func normalizeCoverURL(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.Replace(value, "http://", "https://", 1)
@@ -82,7 +79,6 @@ func normalizeCoverURL(value string) string {
 	return value
 }
 
-// selectBestCover เลือกภาพปกจากความละเอียดสูงสุดที่ Google Books มีให้
 func selectBestCover(info GoogleBookVolumeInfo) string {
 	candidates := []string{
 		info.ImageLinks.ExtraLarge,
@@ -95,7 +91,6 @@ func selectBestCover(info GoogleBookVolumeInfo) string {
 
 	for _, candidate := range candidates {
 		candidate = normalizeCoverURL(candidate)
-
 		if isValidCoverURL(candidate) {
 			return candidate
 		}
@@ -109,7 +104,6 @@ func isValidCoverURL(value string) bool {
 	if err != nil {
 		return false
 	}
-
 	return parsed.Scheme == "https" && parsed.Host != ""
 }
 
@@ -117,39 +111,22 @@ func isPeriodical(title string) bool {
 	title = strings.ToLower(strings.TrimSpace(title))
 
 	keywords := []string{
-		"นิตยสาร",
-		"หนังสือพิมพ์",
-		"รายสัปดาห์",
-		"รายเดือน",
-		"วารสาร",
-		"ฉบับที่",
-		"ประจำวันที่",
-		"magazine",
-		"newspaper",
-		"weekly",
-		"monthly journal",
-		"periodical",
+		"นิตยสาร", "หนังสือพิมพ์", "รายสัปดาห์", "รายเดือน",
+		"วารสาร", "ฉบับที่", "ประจำวันที่", "magazine",
+		"newspaper", "weekly", "monthly journal", "periodical",
 		"newsletter",
 	}
 
-	for _, keyword := range keywords {
-		if strings.Contains(title, keyword) {
-			return true
-		}
-	}
-
-	return false
+	return containsAny(title, keywords)
 }
 
 func extractPublishedYear(date string) int {
 	date = strings.TrimSpace(date)
-
 	if len(date) < 4 {
 		return 0
 	}
 
 	var year int
-
 	if _, err := fmt.Sscanf(date[:4], "%d", &year); err != nil {
 		return 0
 	}
@@ -157,67 +134,47 @@ func extractPublishedYear(date string) int {
 	if year < 1 || year > 9999 {
 		return 0
 	}
-
 	return year
 }
 
-// containsAny ตรวจว่าข้อความมีคำใดคำหนึ่งหรือไม่
 func containsAny(value string, keywords []string) bool {
 	value = strings.ToLower(value)
-
 	for _, keyword := range keywords {
 		if strings.Contains(value, strings.ToLower(keyword)) {
 			return true
 		}
 	}
-
 	return false
 }
 
-// hasThaiText ตรวจว่ามีตัวอักษรภาษาไทยหรือไม่
 func hasThaiText(value string) bool {
 	for _, r := range value {
 		if unicode.Is(unicode.Scripts["Thai"], r) {
 			return true
 		}
 	}
-
 	return false
 }
 
-// isLowQualityDiscoverBook ตัดหนังสือที่ไม่เหมาะกับหน้าแนะนำ
 func isLowQualityDiscoverBook(result GoogleBookResult) bool {
 	text := strings.ToLower(result.Title + " " + result.Description)
 
 	excluded := []string{
-		"คู่มือเตรียมสอบ",
-		"แนวข้อสอบ",
-		"ข้อสอบ",
-		"เตรียมสอบ",
-		"หลักสูตร",
-		"วิทยานิพนธ์",
-		"การจัดการเรียนรู้",
-		"สำหรับครู",
-		"สําหรับครู",
-		"ผู้ปกครอง",
-		"รายงานการวิจัย",
-		"งานวิจัย",
-		"ตำราเรียน",
-		"ตําราเรียน",
-		"แบบเรียน",
-		"magill's guide",
-		"bibliography",
-		"academic journal",
-		"textbook",
-		"exam preparation",
-		"study guide",
+		"คู่มือเตรียมสอบ", "แนวข้อสอบ", "ข้อสอบ", "เตรียมสอบ",
+		"หลักสูตร", "วิทยานิพนธ์", "การจัดการเรียนรู้",
+		"สำหรับครู", "สําหรับครู", "ผู้ปกครอง",
+		"รายงานการวิจัย", "งานวิจัย", "ตำราเรียน",
+		"ตําราเรียน", "แบบเรียน", "แบบฝึกหัด",
+		"เอกสารประกอบการสอน", "เอกสารคำสอน",
+		"academic journal", "bibliography", "textbook",
+		"exam preparation", "study guide", "teacher's guide",
+		"research report", "dissertation", "thesis",
 	}
 
 	if containsAny(text, excluded) {
 		return true
 	}
 
-	// ตัดหนังสือเก่ามากออกจากหน้าแนะนำ
 	if result.PublishedYear > 0 && result.PublishedYear < 2005 {
 		return true
 	}
@@ -225,13 +182,27 @@ func isLowQualityDiscoverBook(result GoogleBookResult) bool {
 	return false
 }
 
-// isRelevantDiscoverBook ตรวจว่าหนังสือตรงกับหมวดที่ค้นหาจริงหรือไม่
+func isAdultRomance(text string) bool {
+	return containsAny(text, []string{
+		"erotic", "erotica", "explicit sexual", "explicit sex",
+		"sexually explicit", "sexual content", "steamy",
+		"spicy romance", "dark erotic", "erotic romance",
+		"dominant and possessive", "bdsm", "seduction",
+		"hot and steamy", "graphic sex", "adult romance",
+		"สำหรับผู้ใหญ่", "เนื้อหาทางเพศ", "ฉากร่วมเพศ",
+		"อีโรติก", "อิโรติก", "เรท 18", "18+",
+	})
+}
+
 func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 	title := strings.ToLower(strings.TrimSpace(result.Title))
-	description := strings.ToLower(strings.TrimSpace(result.Description))
-	text := title + " " + description
+	text := title + " " + strings.ToLower(strings.TrimSpace(result.Description))
 
 	if title == "" || result.GoogleBooksID == "" {
+		return false
+	}
+
+	if !hasThaiText(result.Title) {
 		return false
 	}
 
@@ -239,128 +210,78 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 		return false
 	}
 
-	// หนังสือไทยต้องมีตัวอักษรไทยในชื่อหรือคำอธิบาย
-	if plan.Language == "th" && !hasThaiText(result.Title+" "+result.Description) {
-		return false
-	}
-
 	category := ""
 	if len(plan.Categories) > 0 {
-		category = strings.ToLower(plan.Categories[0])
+		category = strings.ToLower(strings.TrimSpace(plan.Categories[0]))
 	}
 
 	switch category {
-	case "นิยายฮีลใจ", "feel-good":
-		if plan.Language == "th" {
-			return containsAny(text, []string{
-				"ฮีลใจ",
-				"อบอุ่นหัวใจ",
-				"อบอุ่น",
-				"กำลังใจ",
-				"ความสุข",
-				"มิตรภาพ",
-				"เยียวยาใจ",
-				"ฟีลกู๊ด",
-				"feel good",
-			})
-		}
-
-		return containsAny(text, []string{
-			"feel-good",
-			"feel good",
-			"heartwarming",
-			"cozy",
-			"healing",
-			"friendship",
-			"wholesome",
-			"comfort",
-			"self-discovery",
+	case "romance", "bl", "gl":
+		return !isAdultRomance(text) && containsAny(text, []string{
+			"รัก", "โรแมนติก", "ความรัก", "หัวใจ",
+			"romance", "love story", "ความสัมพันธ์",
 		})
 
-	case "มังงะ", "manga":
+	case "fantasy":
 		return containsAny(text, []string{
-			"มังงะ",
-			"การ์ตูน",
-			"manga",
-			"comic",
-			"graphic novel",
-			"light novel",
+			"แฟนตาซี", "เวทมนตร์", "เวทมนต์", "魔法",
+			"มังกร", "อาณาจักร", "fantasy",
+		})
+
+	case "mystery":
+		return containsAny(text, []string{
+			"สืบสวน", "สอบสวน", "ปริศนา", "ฆาตกรรม",
+			"นักสืบ", "ลึกลับ", "mystery", "detective",
+		})
+
+	case "young adult":
+		return containsAny(text, []string{
+			"วัยรุ่น", "โรงเรียน", "มหาวิทยาลัย",
+			"เติบโต", "มิตรภาพ", "young adult",
+		})
+
+	case "feel-good":
+		return containsAny(text, []string{
+			"ฮีลใจ", "อบอุ่น", "กำลังใจ", "ความสุข",
+			"มิตรภาพ", "เยียวยาใจ", "ฟีลกู๊ด",
+			"heartwarming", "feel good",
+		})
+
+	case "manga":
+		return containsAny(text, []string{
+			"มังงะ", "การ์ตูน", "comic", "manga",
+			"graphic novel", "ไลท์โนเวล",
 		}) || containsAny(
 			strings.ToLower(strings.Join(result.Categories, " ")),
-			[]string{
-				"comics & graphic novels",
-				"manga",
-			},
+			[]string{"comics & graphic novels", "manga"},
 		)
 
-	case "จิตวิทยา":
-		if plan.Language == "th" {
-			return containsAny(text, []string{
-				"จิตวิทยา",
-				"เข้าใจตัวเอง",
-				"พัฒนาตนเอง",
-				"ความสัมพันธ์",
-				"ความคิด",
-				"อารมณ์",
-				"ความรู้สึก",
-				"สุขภาพจิต",
-				"ภาวะซึมเศร้า",
-				"การเห็นคุณค่าในตัวเอง",
+	case "psychology":
+		return containsAny(text, []string{
+			"จิตวิทยา", "เข้าใจตัวเอง", "ความสัมพันธ์",
+			"ความคิด", "อารมณ์", "สุขภาพจิต",
+			"ภาวะซึมเศร้า", "เห็นคุณค่าในตัวเอง",
+			"ความมั่นใจ", "จัดการความเครียด",
+		})
+
+	case "self-help":
+		return containsAny(text, []string{
+			"พัฒนาตนเอง", "พัฒนาตัวเอง", "ความสำเร็จ",
+			"เป้าหมาย", "การทำงาน", "การใช้ชีวิต",
+			"วินัย", "self-help",
+		})
+
+	case "thai fiction", "translated fiction":
+		return hasThaiText(result.Title) &&
+			!containsAny(text, []string{
+				"ข้อสอบ", "เตรียมสอบ", "ตำราเรียน",
+				"วิทยานิพนธ์", "แบบเรียน",
 			})
-		}
-
-		return containsAny(text, []string{
-			"psychology",
-			"self-help",
-			"self improvement",
-			"self-improvement",
-			"personal development",
-			"mental health",
-			"emotional",
-			"relationship",
-		})
-
-	case "romance":
-		if containsAny(text, []string{
-			"erotic",
-			"explicit sexual",
-			"erotica",
-			"dominant and possessive",
-			"heated romance",
-		}) {
-			return false
-		}
-
-		return containsAny(text, []string{
-			"romance",
-			"love story",
-			"love interest",
-			"falling in love",
-			"young adult",
-			"high school",
-			"college",
-			"relationship",
-			"heartwarming",
-		})
-
-	case "fiction":
-		return containsAny(text, []string{
-			"feel-good",
-			"feel good",
-			"heartwarming",
-			"cozy",
-			"healing",
-			"friendship",
-			"wholesome",
-			"comfort",
-			"self-discovery",
-		})
 	}
 
 	return false
 }
 
-// AdminSearchGoogleBooks ค้นหาหนังสือจาก Google Books สำหรับ Admin
 func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -375,7 +296,6 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "Search query is required")
 		return
 	}
-
 	if len(query) > 200 {
 		writeError(w, http.StatusBadRequest, "Search query is too long")
 		return
@@ -392,7 +312,6 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	}
 
 	searchQuery := query
-
 	if subject, ok := genreSubjects[genre]; ok {
 		searchQuery += " subject:" + subject
 	}
@@ -409,7 +328,6 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	}
 
 	requestURL := googleBooksURL + "?" + params.Encode()
-
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -420,7 +338,6 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Unable to connect to Google Books")
@@ -434,7 +351,6 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	}
 
 	var googleResponse GoogleBooksResponse
-
 	if err := json.NewDecoder(resp.Body).Decode(&googleResponse); err != nil {
 		writeError(w, http.StatusBadGateway, "Invalid response from Google Books")
 		return
@@ -452,7 +368,6 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 		}
 
 		coverURL := selectBestCover(info)
-
 		if !isValidCoverURL(coverURL) || isPeriodical(title) {
 			continue
 		}
@@ -476,8 +391,8 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// DiscoverBooks ดึงหนังสือจาก Google Books สำหรับหน้า Home
-// ไม่บันทึกหนังสือลงฐานข้อมูล
+// DiscoverBooks ค้นหาหนังสือภาษาไทยสำหรับหน้า Home
+// ไม่บันทึกข้อมูลลง Supabase
 func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -485,79 +400,21 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	plans := []bulkSearchPlan{
-		// หนังสือไทย: นิยายฮีลใจ
-		{
-			Query:      "นิยายฮีลใจ",
-			Language:   "th",
-			Categories: []string{"นิยายฮีลใจ"},
-			Target:     10,
-		},
-		{
-			Query:      "นิยายอบอุ่นหัวใจ กำลังใจ",
-			Language:   "th",
-			Categories: []string{"นิยายฮีลใจ"},
-			Target:     10,
-		},
-
-		// หนังสือไทย: มังงะ
-		{
-			Query:      "มังงะ การ์ตูนญี่ปุ่น",
-			Language:   "th",
-			Subject:    "Comics & Graphic Novels",
-			Categories: []string{"มังงะ"},
-			Target:     10,
-		},
-		{
-			Query:      "การ์ตูนญี่ปุ่น ลิขสิทธิ์",
-			Language:   "th",
-			Subject:    "Comics & Graphic Novels",
-			Categories: []string{"มังงะ"},
-			Target:     10,
-		},
-
-		// หนังสือไทย: จิตวิทยาและพัฒนาตนเอง
-		{
-			Query:      "จิตวิทยา เข้าใจตัวเอง",
-			Language:   "th",
-			Categories: []string{"จิตวิทยา"},
-			Target:     10,
-		},
-		{
-			Query:      "หนังสือพัฒนาตนเอง ความสัมพันธ์ สุขภาพจิต",
-			Language:   "th",
-			Categories: []string{"จิตวิทยา"},
-			Target:     10,
-		},
-
-		// หนังสือต่างประเทศ: Romance
-		{
-			Query:      "young adult contemporary romance",
-			Language:   "en",
-			Subject:    "Romance",
-			Categories: []string{"Romance"},
-			Target:     15,
-		},
-
-		// หนังสือต่างประเทศ: Manga
-		{
-			Query:      "manga graphic novels",
-			Language:   "en",
-			Subject:    "Comics & Graphic Novels",
-			Categories: []string{"Manga"},
-			Target:     15,
-		},
-
-		// หนังสือต่างประเทศ: Feel-good
-		{
-			Query:      "cozy heartwarming feel good fiction",
-			Language:   "en",
-			Subject:    "Fiction",
-			Categories: []string{"Feel-good"},
-			Target:     15,
-		},
+		{Query: "นิยายรักโรแมนติก ภาษาไทย", Language: "th", Subject: "Romance", Categories: []string{"Romance"}, Target: 15},
+		{Query: "นิยายวาย BL ภาษาไทย", Language: "th", Subject: "Romance", Categories: []string{"BL"}, Target: 15},
+		{Query: "นิยายยูริ GL ภาษาไทย", Language: "th", Subject: "Romance", Categories: []string{"GL"}, Target: 10},
+		{Query: "นิยายแฟนตาซี ภาษาไทย", Language: "th", Subject: "Fantasy", Categories: []string{"Fantasy"}, Target: 15},
+		{Query: "นิยายสืบสวนสอบสวน ภาษาไทย", Language: "th", Subject: "Mystery", Categories: []string{"Mystery"}, Target: 10},
+		{Query: "นิยายวัยรุ่น ภาษาไทย", Language: "th", Categories: []string{"Young Adult"}, Target: 10},
+		{Query: "นิยายฮีลใจ อบอุ่นหัวใจ ภาษาไทย", Language: "th", Subject: "Fiction", Categories: []string{"Feel-good"}, Target: 10},
+		{Query: "มังงะ การ์ตูนญี่ปุ่น ภาษาไทย", Language: "th", Subject: "Comics & Graphic Novels", Categories: []string{"Manga"}, Target: 10},
+		{Query: "จิตวิทยา เข้าใจตัวเอง ภาษาไทย", Language: "th", Subject: "Psychology", Categories: []string{"Psychology"}, Target: 10},
+		{Query: "หนังสือพัฒนาตนเอง ภาษาไทย", Language: "th", Subject: "Self-Help", Categories: []string{"Self-Help"}, Target: 10},
+		{Query: "นิยายไทยร่วมสมัย", Language: "th", Subject: "Fiction", Categories: []string{"Thai Fiction"}, Target: 15},
+		{Query: "หนังสือแปลภาษาไทย นิยาย", Language: "th", Subject: "Fiction", Categories: []string{"Translated Fiction"}, Target: 15},
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
 	defer cancel()
 
 	resultsByPlan := make([][]GoogleBookResult, len(plans))
@@ -568,7 +425,6 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 
 	for i, plan := range plans {
 		wg.Add(1)
-
 		go func(index int, currentPlan bulkSearchPlan) {
 			defer wg.Done()
 
@@ -578,10 +434,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 				errorsByPlan[index] = ctx.Err()
 				return
 			}
-
-			defer func() {
-				<-semaphore
-			}()
+			defer func() { <-semaphore }()
 
 			results, err := h.fetchGoogleBooksForImport(
 				ctx,
@@ -589,7 +442,6 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 				currentPlan.Language,
 				currentPlan.Subject,
 			)
-
 			resultsByPlan[index] = results
 			errorsByPlan[index] = err
 		}(i, plan)
@@ -603,14 +455,14 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	books := make([]HomeExternalBook, 0, 100)
-	seen := make(map[string]bool)
+	seenIDs := make(map[string]bool)
+	seenTitles := make(map[string]bool)
 	successfulSearches := 0
 
 	for i, plan := range plans {
 		if errorsByPlan[i] != nil {
 			continue
 		}
-
 		successfulSearches++
 		addedFromPlan := 0
 
@@ -622,11 +474,14 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 			title := strings.TrimSpace(result.Title)
 			author := strings.TrimSpace(result.Author)
 			coverURL := normalizeCoverURL(result.CoverURL)
+			googleID := strings.TrimSpace(result.GoogleBooksID)
 
-			if title == "" ||
-				author == "" ||
-				result.GoogleBooksID == "" ||
-				!isValidCoverURL(coverURL) {
+			if title == "" || author == "" || googleID == "" ||
+				!hasThaiText(title) || !isValidCoverURL(coverURL) {
+				continue
+			}
+
+			if seenIDs[googleID] {
 				continue
 			}
 
@@ -635,14 +490,15 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 					strings.Join(strings.Fields(author), " "),
 			)
 
-			if seen[key] {
+			if seenTitles[key] {
 				continue
 			}
 
-			seen[key] = true
+			seenIDs[googleID] = true
+			seenTitles[key] = true
 
 			books = append(books, HomeExternalBook{
-				ID:            "google_" + result.GoogleBooksID,
+				ID:            "google_" + googleID,
 				Source:        "google_books",
 				Title:         title,
 				Author:        author,
@@ -670,12 +526,13 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data":  books,
-		"total": len(books),
+		"data":     books,
+		"total":    len(books),
+		"target":   100,
+		"language": "th",
 	})
 }
 
-// AdminBulkImportBooks นำเข้าหนังสือจาก Google Books ลงฐานข้อมูล
 func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -683,102 +540,22 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	plans := []bulkSearchPlan{
-		{
-			Query:      "มังงะ การ์ตูน",
-			Language:   "th",
-			Subject:    "Comics & Graphic Novels",
-			Categories: []string{"Young Adult", "Adventure"},
-		},
-		{
-			Query:      "นิยายรัก",
-			Language:   "th",
-			Subject:    "Romance",
-			Categories: []string{"Romance"},
-		},
-		{
-			Query:      "นิยายวาย BL",
-			Language:   "th",
-			Subject:    "Romance",
-			Categories: []string{"Romance", "Young Adult"},
-		},
-		{
-			Query:      "นิยายยูริ GL",
-			Language:   "th",
-			Subject:    "Romance",
-			Categories: []string{"Romance", "Young Adult"},
-		},
-		{
-			Query:      "หนังสือฮีลใจ feel good",
-			Language:   "th",
-			Subject:    "Fiction",
-			Categories: []string{"Young Adult"},
-		},
-		{
-			Query:      "นิยายแฟนตาซี",
-			Language:   "th",
-			Subject:    "Fantasy",
-			Categories: []string{"Fantasy", "Adventure"},
-		},
-		{
-			Query:      "นิยายสืบสวน",
-			Language:   "th",
-			Subject:    "Mystery",
-			Categories: []string{"Mystery", "Thriller"},
-		},
-		{
-			Query:      "จิตวิทยา",
-			Language:   "th",
-			Subject:    "Psychology",
-			Categories: []string{"Self-Help"},
-		},
-		{
-			Query:      "พัฒนาตนเอง",
-			Language:   "th",
-			Subject:    "Self-Help",
-			Categories: []string{"Self-Help"},
-		},
-		{
-			Query:      "manga graphic novels",
-			Language:   "en",
-			Subject:    "Comics & Graphic Novels",
-			Categories: []string{"Young Adult", "Adventure"},
-		},
-		{
-			Query:      "romance novels",
-			Language:   "en",
-			Subject:    "Romance",
-			Categories: []string{"Romance"},
-		},
-		{
-			Query:      "fantasy adventure novels",
-			Language:   "en",
-			Subject:    "Fantasy",
-			Categories: []string{"Fantasy", "Adventure"},
-		},
-		{
-			Query:      "mystery thriller novels",
-			Language:   "en",
-			Subject:    "Mystery",
-			Categories: []string{"Mystery", "Thriller"},
-		},
-		{
-			Query:      "healing feel good books",
-			Language:   "en",
-			Subject:    "Fiction",
-			Categories: []string{"Young Adult"},
-		},
-		{
-			Query:      "psychology books",
-			Language:   "en",
-			Subject:    "Psychology",
-			Categories: []string{"Self-Help"},
-		},
-		{
-			Query:      "self improvement books",
-			Language:   "en",
-			Subject:    "Self-Help",
-			Categories: []string{"Self-Help"},
-		},
+		{Query: "มังงะ การ์ตูน", Language: "th", Subject: "Comics & Graphic Novels", Categories: []string{"Young Adult", "Adventure"}},
+		{Query: "นิยายรัก", Language: "th", Subject: "Romance", Categories: []string{"Romance"}},
+		{Query: "นิยายวาย BL", Language: "th", Subject: "Romance", Categories: []string{"Romance", "Young Adult"}},
+		{Query: "นิยายยูริ GL", Language: "th", Subject: "Romance", Categories: []string{"Romance", "Young Adult"}},
+		{Query: "หนังสือฮีลใจ feel good", Language: "th", Subject: "Fiction", Categories: []string{"Young Adult"}},
+		{Query: "นิยายแฟนตาซี", Language: "th", Subject: "Fantasy", Categories: []string{"Fantasy", "Adventure"}},
+		{Query: "นิยายสืบสวน", Language: "th", Subject: "Mystery", Categories: []string{"Mystery", "Thriller"}},
+		{Query: "จิตวิทยา", Language: "th", Subject: "Psychology", Categories: []string{"Self-Help"}},
+		{Query: "พัฒนาตนเอง", Language: "th", Subject: "Self-Help", Categories: []string{"Self-Help"}},
+		{Query: "manga graphic novels", Language: "en", Subject: "Comics & Graphic Novels", Categories: []string{"Young Adult", "Adventure"}},
+		{Query: "romance novels", Language: "en", Subject: "Romance", Categories: []string{"Romance"}},
+		{Query: "fantasy adventure novels", Language: "en", Subject: "Fantasy", Categories: []string{"Fantasy", "Adventure"}},
+		{Query: "mystery thriller novels", Language: "en", Subject: "Mystery", Categories: []string{"Mystery", "Thriller"}},
+		{Query: "healing feel good books", Language: "en", Subject: "Fiction", Categories: []string{"Young Adult"}},
+		{Query: "psychology books", Language: "en", Subject: "Psychology", Categories: []string{"Self-Help"}},
+		{Query: "self improvement books", Language: "en", Subject: "Self-Help", Categories: []string{"Self-Help"}},
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
@@ -786,13 +563,11 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 
 	resultsByPlan := make([][]GoogleBookResult, len(plans))
 	errorsByPlan := make([]error, len(plans))
-
 	semaphore := make(chan struct{}, 4)
 	var wg sync.WaitGroup
 
 	for i, plan := range plans {
 		wg.Add(1)
-
 		go func(index int, currentPlan bulkSearchPlan) {
 			defer wg.Done()
 
@@ -802,10 +577,7 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				errorsByPlan[index] = ctx.Err()
 				return
 			}
-
-			defer func() {
-				<-semaphore
-			}()
+			defer func() { <-semaphore }()
 
 			results, err := h.fetchGoogleBooksForImport(
 				ctx,
@@ -813,7 +585,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				currentPlan.Language,
 				currentPlan.Subject,
 			)
-
 			resultsByPlan[index] = results
 			errorsByPlan[index] = err
 		}(i, plan)
@@ -827,13 +598,11 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	successfulSearches := 0
-
 	for _, searchErr := range errorsByPlan {
 		if searchErr == nil {
 			successfulSearches++
 		}
 	}
-
 	if successfulSearches == 0 {
 		writeError(w, http.StatusBadGateway, "All Google Books searches failed")
 		return
@@ -853,11 +622,8 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 			description := strings.TrimSpace(result.Description)
 			coverURL := normalizeCoverURL(result.CoverURL)
 
-			if title == "" || author == "" || description == "" || !isValidCoverURL(coverURL) {
-				continue
-			}
-
-			if isPeriodical(title) {
+			if title == "" || author == "" || description == "" ||
+				!isValidCoverURL(coverURL) || isPeriodical(title) {
 				continue
 			}
 
@@ -865,15 +631,12 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				strings.Join(strings.Fields(title), " ") + "|" +
 					strings.Join(strings.Fields(author), " "),
 			)
-
 			if seen[key] {
 				continue
 			}
-
 			seen[key] = true
 
 			var publishedYear *int
-
 			if result.PublishedYear > 0 {
 				year := result.PublishedYear
 				publishedYear = &year
@@ -893,7 +656,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 
 	thaiCandidates := 0
 	foreignCandidates := 0
-
 	for _, book := range importBooks {
 		switch strings.ToLower(book.Language) {
 		case "th":
@@ -930,7 +692,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// fetchGoogleBooksForImport ค้นหาหนังสือจาก Google Books
 func (h *Handler) fetchGoogleBooksForImport(
 	ctx context.Context,
 	query string,
@@ -938,7 +699,6 @@ func (h *Handler) fetchGoogleBooksForImport(
 	subject string,
 ) ([]GoogleBookResult, error) {
 	searchQuery := query
-
 	if subject != "" {
 		searchQuery += " subject:" + subject
 	}
@@ -967,7 +727,6 @@ func (h *Handler) fetchGoogleBooksForImport(
 	}
 
 	client := &http.Client{Timeout: 12 * time.Second}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -982,7 +741,6 @@ func (h *Handler) fetchGoogleBooksForImport(
 	}
 
 	var googleResponse GoogleBooksResponse
-
 	if err := json.NewDecoder(resp.Body).Decode(&googleResponse); err != nil {
 		return nil, err
 	}
@@ -993,14 +751,10 @@ func (h *Handler) fetchGoogleBooksForImport(
 		info := item.VolumeInfo
 		title := strings.TrimSpace(info.Title)
 		author := strings.Join(info.Authors, ", ")
-
 		coverURL := selectBestCover(info)
 
-		if title == "" || strings.TrimSpace(author) == "" || !isValidCoverURL(coverURL) {
-			continue
-		}
-
-		if isPeriodical(title) {
+		if title == "" || strings.TrimSpace(author) == "" ||
+			!isValidCoverURL(coverURL) || isPeriodical(title) {
 			continue
 		}
 
