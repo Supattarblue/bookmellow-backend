@@ -9,7 +9,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const BookCatalogTarget = 100
+const (
+	BookCatalogTarget = 100
+	MinimumBookYear   = 2019
+)
 
 type AdminStats struct {
 	Books   int `json:"books"`
@@ -187,6 +190,13 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
+	`)
+	if err != nil {
+		return err
+	}
 
 	var visible int
 	err = tx.QueryRow(ctx, `
@@ -480,6 +490,7 @@ type BulkImportStats struct {
 	SkippedMissingFields    int `json:"missing_required_fields"`
 	SkippedInvalidCover     int `json:"invalid_cover_url"`
 	SkippedDuplicate        int `json:"duplicate"`
+	SkippedOldYear          int `json:"published_before_2019"`
 	UnmatchedCategories     int `json:"unmatched_categories"`
 	InsertedWithoutCategory int `json:"inserted_without_category"`
 }
@@ -567,6 +578,12 @@ func (s *Store) AdminBulkImportBooksDetailed(
 
 		if !allowedLanguages[book.Language] {
 			stats.SkippedNotThai++
+			skipped++
+			continue
+		}
+
+		if book.PublishedYear == nil || *book.PublishedYear < MinimumBookYear {
+			stats.SkippedOldYear++
 			skipped++
 			continue
 		}
