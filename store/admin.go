@@ -181,9 +181,6 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 	if book.Title == "" || book.Author == "" {
 		return errors.New("book title and author are required")
 	}
-	if !hasThaiScript(book.Title) {
-		return errors.New("only Thai-language book titles are allowed")
-	}
 
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
@@ -270,9 +267,6 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 
 	if book.Title == "" || book.Author == "" {
 		return errors.New("book title and author are required")
-	}
-	if !hasThaiScript(book.Title) {
-		return errors.New("only Thai-language book titles are allowed")
 	}
 
 	tx, err := s.DB.Begin(ctx)
@@ -407,7 +401,7 @@ func (s *Store) AdminBulkCreateBooks(
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
 
-		if book.Title == "" || book.Author == "" || !hasThaiScript(book.Title) {
+		if book.Title == "" || book.Author == "" {
 			skipped++
 			continue
 		}
@@ -544,6 +538,13 @@ func (s *Store) AdminBulkImportBooksDetailed(
 
 	inserted, skipped := 0, 0
 
+	allowedLanguages := map[string]bool{
+		"th": true,
+		"en": true,
+		"ja": true,
+		"ko": true,
+	}
+
 	for _, candidate := range books {
 		if inserted >= remaining {
 			stats.SkippedLimit++
@@ -564,8 +565,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 			continue
 		}
 
-		// อนุญาตเฉพาะหนังสือภาษาไทย
-		if book.Language != "th" || !hasThaiScript(book.Title) {
+		if !allowedLanguages[book.Language] {
 			stats.SkippedNotThai++
 			skipped++
 			continue
