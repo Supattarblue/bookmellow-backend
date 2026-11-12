@@ -106,7 +106,6 @@ func isValidCoverURL(value string) bool {
 	if err != nil {
 		return false
 	}
-
 	return parsed.Scheme == "https" && parsed.Host != ""
 }
 
@@ -159,7 +158,6 @@ func hasThaiText(value string) bool {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -186,12 +184,12 @@ func isAdultRomance(text string) bool {
 		"erotic", "erotica", "explicit sexual", "explicit sex",
 		"sexually explicit", "sexual content", "steamy",
 		"spicy romance", "dark erotic", "erotic romance",
-		"dominant and possessive", "bdsm", "seduction",
+		"dominant and possessive", "bdsm",
 		"hot and steamy", "graphic sex", "adult romance",
 		"สำหรับผู้ใหญ่", "เนื้อหาทางเพศ", "ฉากร่วมเพศ",
 		"อีโรติก", "อิโรติก", "เรท 18", "18+",
 		"nc18", "nc-18", "20+", "ฉากร่วมรัก",
-		"ฉากเลิฟซีน", "เนื้อหา 20+",
+		"เนื้อหา 20+",
 	})
 }
 
@@ -219,7 +217,14 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 		return false
 	}
 
+	// ต้องมีข้อความภาษาไทยอย่างน้อยในชื่อหรือคำอธิบาย
 	if !hasThaiText(title) && !hasThaiText(description) {
+		return false
+	}
+
+	// หาก Google ระบุภาษาไว้ชัดเจนว่าไม่ใช่ภาษาไทย ให้ตัดออก
+	// แต่ถ้า Google ไม่ระบุภาษา จะพิจารณาจากข้อความภาษาไทยแทน
+	if result.Language != "" && !strings.EqualFold(result.Language, "th") {
 		return false
 	}
 
@@ -317,8 +322,6 @@ func isAllowedDiscoverCategory(category string) bool {
 }
 
 func getPlanCategory(plan bulkSearchPlan, result GoogleBookResult) string {
-	// ใช้หมวดหมู่จากคำค้นเป็นหลัก
-	// ไม่ใช้ Google Categories ก่อน เพราะ Google มักจัดหมวดหมู่กว้างหรือคลาดเคลื่อน
 	if len(plan.Categories) > 0 {
 		category := strings.TrimSpace(plan.Categories[0])
 		if isAllowedDiscoverCategory(category) {
@@ -580,7 +583,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		category string
 	}
 
-	candidates := make([]discoverCandidate, 0, 500)
+	candidates := make([]discoverCandidate, 0, 600)
 
 	for i, plan := range plans {
 		if errorsByPlan[i] != nil {
@@ -592,11 +595,9 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			category := getPlanCategory(plan, result)
-
 			candidates = append(candidates, discoverCandidate{
 				result:   result,
-				category: category,
+				category: getPlanCategory(plan, result),
 			})
 		}
 	}
@@ -675,19 +676,24 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		}
 
 		target := categoryTargets[candidate.category]
-		if target == 0 {
-			continue
-		}
-
-		if categoryCounts[candidate.category] >= target {
+		if target == 0 || categoryCounts[candidate.category] >= target {
 			continue
 		}
 
 		addCandidate(candidate)
 	}
 
-	// ไม่เติมเกินโควตาด้วยหนังสือจากหมวดอื่น
-	// เพื่อไม่ให้จำนวนแต่ละหมวดผิดจากที่กำหนด
+	// รอบสอง: หากบางหมวดมีหนังสือไม่พอ ให้ใช้ผลลัพธ์จากหมวดอื่นเติม
+	// โดยยังคงใช้เฉพาะ 15 หมวดที่อนุญาต และไม่เกิน 100 เล่ม
+	if len(books) < 100 {
+		for _, candidate := range candidates {
+			if len(books) >= 100 {
+				break
+			}
+
+			addCandidate(candidate)
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data":                books,
@@ -716,7 +722,10 @@ func (h *Handler) fetchGoogleBooksForDiscover(
 	params.Set("maxResults", "40")
 	params.Set("printType", "books")
 	params.Set("orderBy", "relevance")
-	params.Set("langRestrict", lang)
+
+	// ไม่ใส่ langRestrict ใน Discover
+	// เพราะ Google Books อาจตัดหนังสือภาษาไทยบางรายการออก
+	// แม้ข้อมูลชื่อหรือคำอธิบายจะเป็นภาษาไทยก็ตาม
 	params.Set("key", h.GoogleBooksAPIKey)
 
 	requestURL := googleBooksURL + "?" + params.Encode()
@@ -742,10 +751,7 @@ func (h *Handler) fetchGoogleBooksForDiscover(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"Google Books API returned status %d",
-			resp.StatusCode,
-		)
+		return nil, fmt.Errorf("Google Books API returned status %d", resp.StatusCode)
 	}
 
 	var googleResponse GoogleBooksResponse
@@ -770,10 +776,12 @@ func (h *Handler) fetchGoogleBooksForDiscover(
 			continue
 		}
 
+		// ถ้าระบุภาษาเป็นภาษาอื่นอย่างชัดเจน ไม่รับเข้ารายการ
 		if language != "" && language != "th" {
 			continue
 		}
 
+		// ถ้า Google ไม่ระบุภาษา ให้ตรวจจากชื่อและคำอธิบาย
 		if language == "" {
 			if !hasThaiText(title) && !hasThaiText(description) {
 				continue
@@ -935,6 +943,8 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ฟังก์ชันนี้จะเปลี่ยนข้อมูลหนังสือเดิมในฐานข้อมูล
+	// จึงต้องผ่านการตรวจสอบ candidate ให้ครบก่อนเรียกใช้งาน
 	replaced, skipped, total, remaining, stats, err :=
 		h.Store.AdminReplaceNonThaiBooks(r.Context(), importBooks)
 
@@ -1000,10 +1010,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"Google Books API returned status %d",
-			resp.StatusCode,
-		)
+		return nil, fmt.Errorf("Google Books API returned status %d", resp.StatusCode)
 	}
 
 	var googleResponse GoogleBooksResponse
@@ -1025,6 +1032,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 		}
 
 		if title == "" || strings.TrimSpace(author) == "" ||
+			item.ID == "" ||
 			!hasThaiText(title) ||
 			!isValidCoverURL(coverURL) ||
 			isPeriodical(title) ||
