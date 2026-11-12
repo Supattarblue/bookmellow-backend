@@ -606,3 +606,9 @@ func (h *Handler) fetchGoogleBooksForImport(
 
 	return results, nil
 }
+func normalizeCoverURL(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Replace(value, "http://", "https://", 1)
+	value = strings.ReplaceAll(value, "&amp;", "&")
+	return value
+}
