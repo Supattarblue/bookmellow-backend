@@ -24,11 +24,7 @@ func (s *Store) AdminDashboard(ctx context.Context) (*AdminStats, error) {
 			(SELECT COUNT(*) FROM books),
 			(SELECT COUNT(*) FROM users WHERE role = 'member'),
 			(SELECT COUNT(*) FROM users WHERE role = 'admin')
-	`).Scan(
-		&stats.Books,
-		&stats.Members,
-		&stats.Admins,
-	)
+	`).Scan(&stats.Books, &stats.Members, &stats.Admins)
 	if err != nil {
 		return nil, err
 	}
@@ -53,16 +49,9 @@ func (s *Store) AdminListMembers(ctx context.Context, search string) ([]User, er
 
 	for rows.Next() {
 		var user User
-
-		if err := rows.Scan(
-			&user.ID,
-			&user.Username,
-			&user.Email,
-			&user.Role,
-		); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.Role); err != nil {
 			return nil, err
 		}
-
 		members = append(members, user)
 	}
 
@@ -82,10 +71,7 @@ func (s *Store) AdminUpdateMember(ctx context.Context, id, username, email strin
 		WHERE id = $3
 		RETURNING id, username, email, role
 	`, username, email, id).Scan(
-		&user.ID,
-		&user.Username,
-		&user.Email,
-		&user.Role,
+		&user.ID, &user.Username, &user.Email, &user.Role,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -105,7 +91,6 @@ func (s *Store) AdminSetRole(ctx context.Context, id, role string) error {
 	defer tx.Rollback(ctx)
 
 	var currentRole string
-
 	err = tx.QueryRow(ctx, `
 		SELECT role
 		FROM users
@@ -122,13 +107,11 @@ func (s *Store) AdminSetRole(ctx context.Context, id, role string) error {
 
 	if currentRole == "admin" && role == "member" {
 		var adminCount int
-
 		err = tx.QueryRow(ctx, `
 			SELECT COUNT(*)
 			FROM users
 			WHERE role = 'admin'
 		`).Scan(&adminCount)
-
 		if err != nil {
 			return err
 		}
@@ -143,7 +126,6 @@ func (s *Store) AdminSetRole(ctx context.Context, id, role string) error {
 		SET role = $1
 		WHERE id = $2
 	`, role, id)
-
 	if err != nil {
 		return err
 	}
@@ -159,7 +141,6 @@ func (s *Store) AdminDeleteMember(ctx context.Context, id string) error {
 	defer tx.Rollback(ctx)
 
 	var role string
-
 	err = tx.QueryRow(ctx, `
 		SELECT role
 		FROM users
@@ -176,13 +157,11 @@ func (s *Store) AdminDeleteMember(ctx context.Context, id string) error {
 
 	if role == "admin" {
 		var adminCount int
-
 		err = tx.QueryRow(ctx, `
 			SELECT COUNT(*)
 			FROM users
 			WHERE role = 'admin'
 		`).Scan(&adminCount)
-
 		if err != nil {
 			return err
 		}
@@ -196,7 +175,6 @@ func (s *Store) AdminDeleteMember(ctx context.Context, id string) error {
 		DELETE FROM users
 		WHERE id = $1
 	`, id)
-
 	if err != nil {
 		return err
 	}
@@ -253,12 +231,10 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 
 	for rows.Next() {
 		var categoryName string
-
 		if err := rows.Scan(&categoryName); err != nil {
 			rows.Close()
 			return err
 		}
-
 		book.Categories = append(book.Categories, categoryName)
 	}
 
@@ -278,7 +254,7 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `
+	result, err := tx.Exec(ctx, `
 		UPDATE books
 		SET title = $1,
 		    author = $2,
@@ -297,6 +273,9 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 	)
 	if err != nil {
 		return err
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -332,12 +311,10 @@ func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []s
 
 	for rows.Next() {
 		var categoryName string
-
 		if err := rows.Scan(&categoryName); err != nil {
 			rows.Close()
 			return err
 		}
-
 		book.Categories = append(book.Categories, categoryName)
 	}
 
@@ -373,8 +350,7 @@ type AdminBulkBook struct {
 }
 
 // AdminBulkCreateBooks imports multiple books in one transaction.
-// The maxBooks argument is retained for compatibility with existing callers,
-// but it no longer imposes a catalog limit.
+// The maxBooks argument is retained for compatibility but does not limit the catalog.
 func (s *Store) AdminBulkCreateBooks(
 	ctx context.Context,
 	items []AdminBulkBook,
@@ -386,9 +362,7 @@ func (s *Store) AdminBulkCreateBooks(
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `
-		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
-	`)
+	_, err = tx.Exec(ctx, `LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE`)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -398,7 +372,6 @@ func (s *Store) AdminBulkCreateBooks(
 
 	for _, item := range items {
 		book := item.Book
-
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
 
@@ -408,7 +381,6 @@ func (s *Store) AdminBulkCreateBooks(
 		}
 
 		var exists bool
-
 		err = tx.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1
@@ -417,7 +389,6 @@ func (s *Store) AdminBulkCreateBooks(
 				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
 			)
 		`, book.Title, book.Author).Scan(&exists)
-
 		if err != nil {
 			return 0, 0, err
 		}
@@ -429,11 +400,7 @@ func (s *Store) AdminBulkCreateBooks(
 
 		err = tx.QueryRow(ctx, `
 			INSERT INTO books (
-				title,
-				author,
-				description,
-				cover_url,
-				published_year
+				title, author, description, cover_url, published_year
 			)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id
@@ -444,7 +411,6 @@ func (s *Store) AdminBulkCreateBooks(
 			book.CoverURL,
 			book.PublishedYear,
 		).Scan(&book.ID)
-
 		if err != nil {
 			return 0, 0, err
 		}
@@ -454,7 +420,6 @@ func (s *Store) AdminBulkCreateBooks(
 				INSERT INTO book_categories (book_id, category_id)
 				VALUES ($1, $2)
 			`, book.ID, categoryID)
-
 			if err != nil {
 				return 0, 0, err
 			}
@@ -481,7 +446,7 @@ type BulkImportBook struct {
 	Language      string
 }
 
-// BulkImportStats reports why candidate books were not inserted.
+// BulkImportStats reports why candidate books were not inserted or replaced.
 type BulkImportStats struct {
 	SkippedLimit            int `json:"limit_reached"`
 	SkippedNotThai          int `json:"not_thai"`
@@ -492,8 +457,6 @@ type BulkImportStats struct {
 	InsertedWithoutCategory int `json:"inserted_without_category"`
 }
 
-// AdminBulkImportBooks preserves the original method signature for callers
-// that still use the legacy import function.
 func (s *Store) AdminBulkImportBooks(
 	ctx context.Context,
 	books []BulkImportBook,
@@ -502,9 +465,8 @@ func (s *Store) AdminBulkImportBooks(
 	return inserted, skipped, total, err
 }
 
-// AdminBulkImportBooksDetailed imports Thai-language books and returns
-// counters explaining every skipped candidate.
-// There is no fixed maximum catalog size.
+// AdminBulkImportBooksDetailed imports Thai books without a fixed catalog limit.
+// It only uses the existing 15 category names. It does not create "Other".
 func (s *Store) AdminBulkImportBooksDetailed(
 	ctx context.Context,
 	books []BulkImportBook,
@@ -517,9 +479,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `
-		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
-	`)
+	_, err = tx.Exec(ctx, `LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE`)
 	if err != nil {
 		return 0, 0, 0, stats, err
 	}
@@ -535,13 +495,13 @@ func (s *Store) AdminBulkImportBooksDetailed(
 
 	for _, candidate := range books {
 		book := candidate
-
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
 		book.Description = strings.TrimSpace(book.Description)
 		book.CoverURL = strings.TrimSpace(book.CoverURL)
 
-		if !strings.EqualFold(strings.TrimSpace(book.Language), "th") {
+		if !strings.EqualFold(strings.TrimSpace(book.Language), "th") ||
+			!hasThaiScript(book.Title+" "+book.Description) {
 			stats.SkippedNotThai++
 			skipped++
 			continue
@@ -582,11 +542,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		var bookID string
 		err = tx.QueryRow(ctx, `
 			INSERT INTO books (
-				title,
-				author,
-				description,
-				cover_url,
-				published_year
+				title, author, description, cover_url, published_year
 			)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id
@@ -602,6 +558,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		}
 
 		matchedCategories := 0
+
 		for _, categoryName := range book.Categories {
 			categoryName = strings.TrimSpace(categoryName)
 			if categoryName == "" {
@@ -632,32 +589,12 @@ func (s *Store) AdminBulkImportBooksDetailed(
 			if err != nil {
 				return 0, 0, 0, stats, err
 			}
+
 			matchedCategories++
 		}
 
 		if matchedCategories == 0 {
-			var otherCategoryID string
-			fallbackErr := tx.QueryRow(ctx, `
-				SELECT id
-				FROM categories
-				WHERE LOWER(BTRIM(name)) = 'other'
-				LIMIT 1
-			`).Scan(&otherCategoryID)
-
-			if fallbackErr == nil {
-				_, err = tx.Exec(ctx, `
-					INSERT INTO book_categories (book_id, category_id)
-					VALUES ($1, $2)
-					ON CONFLICT DO NOTHING
-				`, bookID, otherCategoryID)
-				if err != nil {
-					return 0, 0, 0, stats, err
-				}
-			} else if errors.Is(fallbackErr, pgx.ErrNoRows) {
-				stats.InsertedWithoutCategory++
-			} else {
-				return 0, 0, 0, stats, fallbackErr
-			}
+			stats.InsertedWithoutCategory++
 		}
 
 		inserted++
@@ -671,10 +608,9 @@ func (s *Store) AdminBulkImportBooksDetailed(
 	return inserted, skipped, total, stats, nil
 }
 
-// AdminReplaceNonThaiBooks replaces exactly the non-Thai catalog rows in place.
-// It preserves each books.id and all relations outside book_categories.
-// The operation is all-or-nothing: no rows are changed unless 85 valid,
-// distinct Thai candidates are available and exactly 85 target rows exist.
+// AdminReplaceNonThaiBooks replaces exactly 85 non-Thai catalog rows in place.
+// It preserves books.id and all relations except book_categories.
+// The transaction makes the replacement all-or-nothing.
 func (s *Store) AdminReplaceNonThaiBooks(
 	ctx context.Context,
 	books []BulkImportBook,
@@ -687,9 +623,7 @@ func (s *Store) AdminReplaceNonThaiBooks(
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `
-		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
-	`)
+	_, err = tx.Exec(ctx, `LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE`)
 	if err != nil {
 		return 0, 0, 0, 0, stats, err
 	}
@@ -710,12 +644,10 @@ func (s *Store) AdminReplaceNonThaiBooks(
 
 	for rows.Next() {
 		var id string
-
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
 			return 0, 0, 0, 0, stats, err
 		}
-
 		targetIDs = append(targetIDs, id)
 	}
 
@@ -733,13 +665,11 @@ func (s *Store) AdminReplaceNonThaiBooks(
 		)
 	}
 
-	// Validate and de-duplicate candidates before modifying any book row.
 	validBooks := make([]BulkImportBook, 0, expectedTargets)
 	seen := make(map[string]bool)
 
 	for _, candidate := range books {
 		book := candidate
-
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
 		book.Description = strings.TrimSpace(book.Description)
@@ -778,7 +708,6 @@ func (s *Store) AdminReplaceNonThaiBooks(
 		}
 
 		var exists bool
-
 		err = tx.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1
@@ -788,7 +717,6 @@ func (s *Store) AdminReplaceNonThaiBooks(
 				  AND id::text <> ALL($3::text[])
 			)
 		`, book.Title, book.Author, targetIDs).Scan(&exists)
-
 		if err != nil {
 			return 0, 0, 0, 0, stats, err
 		}
@@ -853,7 +781,6 @@ func (s *Store) AdminReplaceNonThaiBooks(
 			}
 
 			var categoryID string
-
 			err = tx.QueryRow(ctx, `
 				SELECT id
 				FROM categories
@@ -874,7 +801,6 @@ func (s *Store) AdminReplaceNonThaiBooks(
 				VALUES ($1, $2)
 				ON CONFLICT DO NOTHING
 			`, bookID, categoryID)
-
 			if err != nil {
 				return 0, 0, 0, 0, stats, err
 			}
@@ -889,10 +815,7 @@ func (s *Store) AdminReplaceNonThaiBooks(
 		replaced++
 	}
 
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM books
-	`).Scan(&total)
-
+	err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM books`).Scan(&total)
 	if err != nil {
 		return 0, 0, 0, 0, stats, err
 	}
@@ -913,6 +836,5 @@ func hasThaiScript(value string) bool {
 			return true
 		}
 	}
-
 	return false
 }

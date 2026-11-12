@@ -1,4 +1,3 @@
-
 package handler
 
 import (
@@ -209,7 +208,7 @@ func cleanBookDescription(description string) string {
 	return description
 }
 
-func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
+func isRelevantDiscoverBook(result GoogleBookResult, _ bulkSearchPlan) bool {
 	title := strings.TrimSpace(result.Title)
 	author := strings.TrimSpace(result.Author)
 	description := cleanBookDescription(result.Description)
@@ -238,11 +237,7 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 		return false
 	}
 
-	if !isValidCoverURL(result.CoverURL) {
-		return false
-	}
-
-	return true
+	return isValidCoverURL(result.CoverURL)
 }
 
 func normalizeDiscoverCategory(categories []string, result GoogleBookResult) []string {
@@ -333,6 +328,26 @@ func getPlanCategory(plan bulkSearchPlan, result GoogleBookResult) string {
 	}
 
 	return "Young Adult"
+}
+
+func discoverCategoryTargets() map[string]int {
+	return map[string]int{
+		"Romance":            12,
+		"Fantasy":            8,
+		"Mystery":            8,
+		"Young Adult":        7,
+		"Self-Help":          8,
+		"Business":           6,
+		"Biography":          5,
+		"Children":           6,
+		"Horror":             6,
+		"Science Fiction":    6,
+		"Adventure":          7,
+		"Historical Fiction": 5,
+		"Poetry":             5,
+		"Education":          4,
+		"Thriller":           7,
+	}
 }
 
 func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request) {
@@ -446,8 +461,8 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// DiscoverBooks ค้นหาหนังสือภาษาไทยจาก Google Books
-// ไม่บันทึกข้อมูลลง Supabase
+// DiscoverBooks searches Thai books from Google Books.
+// This endpoint does not save anything to Supabase.
 func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -457,24 +472,31 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	plans := []bulkSearchPlan{
 		{Query: "นิยายรักไทย", Language: "th", Categories: []string{"Romance"}},
 		{Query: "นิยายโรแมนติกไทย", Language: "th", Categories: []string{"Romance"}},
+		{Query: "นิยายรักร่วมสมัย ภาษาไทย", Language: "th", Categories: []string{"Romance"}},
 
 		{Query: "นิยายแฟนตาซีไทย", Language: "th", Categories: []string{"Fantasy"}},
 		{Query: "นิยายกำลังภายใน แฟนตาซี", Language: "th", Categories: []string{"Fantasy"}},
+		{Query: "วรรณกรรมแฟนตาซี ภาษาไทย", Language: "th", Categories: []string{"Fantasy"}},
 
 		{Query: "นิยายสืบสวนไทย", Language: "th", Categories: []string{"Mystery"}},
 		{Query: "นิยายฆาตกรรม ปริศนา", Language: "th", Categories: []string{"Mystery"}},
+		{Query: "นิยายสืบสวนสอบสวน ภาษาไทย", Language: "th", Categories: []string{"Mystery"}},
 
 		{Query: "นิยายวัยรุ่นไทย", Language: "th", Categories: []string{"Young Adult"}},
 		{Query: "วรรณกรรมเยาวชนไทย", Language: "th", Categories: []string{"Young Adult"}},
+		{Query: "วรรณกรรมสำหรับวัยรุ่น ภาษาไทย", Language: "th", Categories: []string{"Young Adult"}},
 
 		{Query: "หนังสือจิตวิทยาไทย", Language: "th", Categories: []string{"Self-Help"}},
 		{Query: "หนังสือพัฒนาตนเองไทย", Language: "th", Categories: []string{"Self-Help"}},
+		{Query: "หนังสือพัฒนาตัวเอง ความคิด ภาษาไทย", Language: "th", Categories: []string{"Self-Help"}},
 
 		{Query: "หนังสือธุรกิจไทย", Language: "th", Categories: []string{"Business"}},
 		{Query: "หนังสือการเงิน การลงทุน ภาษาไทย", Language: "th", Categories: []string{"Business"}},
+		{Query: "หนังสือการตลาด ผู้ประกอบการ ภาษาไทย", Language: "th", Categories: []string{"Business"}},
 
 		{Query: "ชีวประวัติบุคคลสำคัญไทย", Language: "th", Categories: []string{"Biography"}},
 		{Query: "อัตชีวประวัติ ภาษาไทย", Language: "th", Categories: []string{"Biography"}},
+		{Query: "ประวัติชีวิต บุคคลสำคัญ หนังสือ", Language: "th", Categories: []string{"Biography"}},
 
 		{Query: "นิทานเด็กไทย", Language: "th", Categories: []string{"Children"}},
 		{Query: "หนังสือสำหรับเด็ก ภาษาไทย", Language: "th", Categories: []string{"Children"}},
@@ -482,15 +504,19 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 
 		{Query: "นิยายสยองขวัญไทย", Language: "th", Categories: []string{"Horror"}},
 		{Query: "เรื่องผีไทย หนังสือ", Language: "th", Categories: []string{"Horror"}},
+		{Query: "นิยายสยองขวัญ ผี วิญญาณ ภาษาไทย", Language: "th", Categories: []string{"Horror"}},
 
 		{Query: "นิยายวิทยาศาสตร์ไทย", Language: "th", Categories: []string{"Science Fiction"}},
 		{Query: "นิยายไซไฟ ภาษาไทย", Language: "th", Categories: []string{"Science Fiction"}},
+		{Query: "วิทยาศาสตร์ อนาคต อวกาศ นิยายไทย", Language: "th", Categories: []string{"Science Fiction"}},
 
 		{Query: "นิยายผจญภัยไทย", Language: "th", Categories: []string{"Adventure"}},
 		{Query: "วรรณกรรมผจญภัย ภาษาไทย", Language: "th", Categories: []string{"Adventure"}},
+		{Query: "การเดินทาง ภารกิจ ผจญภัย หนังสือไทย", Language: "th", Categories: []string{"Adventure"}},
 
 		{Query: "นิยายอิงประวัติศาสตร์ไทย", Language: "th", Categories: []string{"Historical Fiction"}},
 		{Query: "วรรณกรรมประวัติศาสตร์ ภาษาไทย", Language: "th", Categories: []string{"Historical Fiction"}},
+		{Query: "นิยายย้อนยุค ประวัติศาสตร์ไทย", Language: "th", Categories: []string{"Historical Fiction"}},
 
 		{Query: "บทกวีไทย กวีนิพนธ์", Language: "th", Categories: []string{"Poetry"}},
 		{Query: "รวมบทกลอน ภาษาไทย", Language: "th", Categories: []string{"Poetry"}},
@@ -498,12 +524,14 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 
 		{Query: "หนังสือการศึกษา ภาษาไทย", Language: "th", Categories: []string{"Education"}},
 		{Query: "หนังสือความรู้ ภาษาไทย", Language: "th", Categories: []string{"Education"}},
+		{Query: "หนังสือความรู้ทั่วไป สาระความรู้ ภาษาไทย", Language: "th", Categories: []string{"Education"}},
 
 		{Query: "นิยายระทึกขวัญไทย", Language: "th", Categories: []string{"Thriller"}},
 		{Query: "หนังสือ thriller ภาษาไทย", Language: "th", Categories: []string{"Thriller"}},
+		{Query: "นิยายลึกลับ ระทึกขวัญ ภาษาไทย", Language: "th", Categories: []string{"Thriller"}},
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 65*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
 	resultsByPlan := make([][]GoogleBookResult, len(plans))
@@ -524,7 +552,6 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 				errorsByPlan[index] = ctx.Err()
 				return
 			}
-
 			defer func() { <-semaphore }()
 
 			results, err := h.fetchGoogleBooksForDiscover(
@@ -558,30 +585,14 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	categoryTargets := map[string]int{
-		"Romance":            12,
-		"Fantasy":            8,
-		"Mystery":            8,
-		"Young Adult":        7,
-		"Self-Help":          8,
-		"Business":           6,
-		"Biography":          5,
-		"Children":           6,
-		"Horror":             6,
-		"Science Fiction":    6,
-		"Adventure":          7,
-		"Historical Fiction": 5,
-		"Poetry":             5,
-		"Education":          4,
-		"Thriller":           7,
-	}
+	categoryTargets := discoverCategoryTargets()
 
 	type discoverCandidate struct {
 		result   GoogleBookResult
 		category string
 	}
 
-	candidates := make([]discoverCandidate, 0, 600)
+	candidates := make([]discoverCandidate, 0, 1000)
 
 	for i, plan := range plans {
 		if errorsByPlan[i] != nil {
@@ -623,6 +634,11 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !isAllowedDiscoverCategory(category) {
+			return false
+		}
+
+		target := categoryTargets[category]
+		if target <= 0 || categoryCounts[category] >= target {
 			return false
 		}
 
@@ -669,28 +685,23 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	// รอบแรก: เติมหนังสือให้แต่ละหมวดตามโควตาที่กำหนด
 	candidateUsed := make([]bool, len(candidates))
 
+	// First pass: fill each category up to its own target.
 	for i, candidate := range candidates {
 		if len(books) >= 100 {
 			break
-		}
-
-		target := categoryTargets[candidate.category]
-		if target == 0 || categoryCounts[candidate.category] >= target {
-			continue
 		}
 
 		candidateUsed[i] = true
 		addCandidate(candidate)
 	}
 
-	// รอบสอง: เลือกหมวดที่มีสัดส่วนต่ำกว่าโควตามากที่สุดก่อน
-	// เพื่อไม่ให้ Romance หรือหมวดที่มีผลค้นหามากครองรายการส่วนที่เหลือ
+	// Second pass: continue with the category furthest below its target.
+	// Categories that already reached their target are never selected again.
 	for len(books) < 100 {
 		bestIndex := -1
-		bestRatio := 999.0
+		bestRatio := 2.0
 
 		for i, candidate := range candidates {
 			if candidateUsed[i] {
@@ -700,7 +711,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 			category := candidate.category
 			target := categoryTargets[category]
 
-			if target <= 0 {
+			if target <= 0 || categoryCounts[category] >= target {
 				candidateUsed[i] = true
 				continue
 			}
@@ -721,6 +732,14 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		addCandidate(candidates[bestIndex])
 	}
 
+	missingCategories := make(map[string]int)
+	for category, target := range categoryTargets {
+		missing := target - categoryCounts[category]
+		if missing > 0 {
+			missingCategories[category] = missing
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data":                books,
 		"total":               len(books),
@@ -728,6 +747,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		"language":            "th",
 		"successful_searches": successfulSearches,
 		"category_counts":     categoryCounts,
+		"missing_categories":  missingCategories,
 	})
 }
 
@@ -826,6 +846,8 @@ func (h *Handler) fetchGoogleBooksForDiscover(
 	return results, nil
 }
 
+// AdminBulkImportBooks searches for Thai candidates and replaces the 85
+// non-Thai catalog rows only after enough valid unique candidates are found.
 func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -837,27 +859,41 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		{Query: "นิยายวาย BL ภาษาไทย", Language: "th", Categories: []string{"Romance"}},
 		{Query: "นิยายยูริ GL ภาษาไทย", Language: "th", Categories: []string{"Romance"}},
 		{Query: "นิยายแฟนตาซี ภาษาไทย", Language: "th", Categories: []string{"Fantasy"}},
+		{Query: "นิยายกำลังภายใน แฟนตาซี ภาษาไทย", Language: "th", Categories: []string{"Fantasy"}},
 		{Query: "นิยายผจญภัย ภาษาไทย", Language: "th", Categories: []string{"Adventure"}},
+		{Query: "วรรณกรรมผจญภัย ภาษาไทย", Language: "th", Categories: []string{"Adventure"}},
 		{Query: "นิยายสืบสวนสอบสวน ภาษาไทย", Language: "th", Categories: []string{"Mystery"}},
+		{Query: "นิยายฆาตกรรม ปริศนา ภาษาไทย", Language: "th", Categories: []string{"Mystery"}},
 		{Query: "นิยายระทึกขวัญ ภาษาไทย", Language: "th", Categories: []string{"Thriller"}},
 		{Query: "นิยายวัยรุ่น ภาษาไทย", Language: "th", Categories: []string{"Young Adult"}},
+		{Query: "วรรณกรรมเยาวชน ภาษาไทย", Language: "th", Categories: []string{"Young Adult"}},
 		{Query: "นิยายวิทยาศาสตร์ ภาษาไทย", Language: "th", Categories: []string{"Science Fiction"}},
+		{Query: "นิยายไซไฟ อวกาศ ภาษาไทย", Language: "th", Categories: []string{"Science Fiction"}},
 		{Query: "หนังสือสยองขวัญ ภาษาไทย", Language: "th", Categories: []string{"Horror"}},
+		{Query: "นิยายผี วิญญาณ ภาษาไทย", Language: "th", Categories: []string{"Horror"}},
 		{Query: "จิตวิทยา พัฒนาตนเอง ภาษาไทย", Language: "th", Categories: []string{"Self-Help"}},
+		{Query: "หนังสือพัฒนาตัวเอง ภาษาไทย", Language: "th", Categories: []string{"Self-Help"}},
 		{Query: "ชีวประวัติ บุคคลสำคัญ ภาษาไทย", Language: "th", Categories: []string{"Biography"}},
+		{Query: "อัตชีวประวัติ ภาษาไทย", Language: "th", Categories: []string{"Biography"}},
 		{Query: "หนังสือความรู้สำหรับเด็ก ภาษาไทย", Language: "th", Categories: []string{"Children"}},
+		{Query: "นิทานภาพสำหรับเด็ก ภาษาไทย", Language: "th", Categories: []string{"Children"}},
 		{Query: "หนังสือความรู้ การเรียนรู้ ภาษาไทย", Language: "th", Categories: []string{"Education"}},
+		{Query: "หนังสือการศึกษา ภาษาไทย", Language: "th", Categories: []string{"Education"}},
 		{Query: "ธุรกิจ การเงิน การทำงาน ภาษาไทย", Language: "th", Categories: []string{"Business"}},
+		{Query: "การตลาด การลงทุน ผู้ประกอบการ ภาษาไทย", Language: "th", Categories: []string{"Business"}},
 		{Query: "นิยายอิงประวัติศาสตร์ ภาษาไทย", Language: "th", Categories: []string{"Historical Fiction"}},
+		{Query: "วรรณกรรมย้อนยุค ประวัติศาสตร์ ภาษาไทย", Language: "th", Categories: []string{"Historical Fiction"}},
 		{Query: "บทกวี กวีนิพนธ์ ภาษาไทย", Language: "th", Categories: []string{"Poetry"}},
+		{Query: "รวมบทกลอน วรรณกรรมไทย", Language: "th", Categories: []string{"Poetry"}},
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 70*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
 	defer cancel()
 
 	resultsByPlan := make([][]GoogleBookResult, len(plans))
 	errorsByPlan := make([]error, len(plans))
-	semaphore := make(chan struct{}, 6)
+
+	semaphore := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 
 	for i, plan := range plans {
@@ -872,7 +908,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				errorsByPlan[index] = ctx.Err()
 				return
 			}
-
 			defer func() { <-semaphore }()
 
 			results, err := h.fetchGoogleBooksForImport(
@@ -906,11 +941,20 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	categoryTargets := discoverCategoryTargets()
+
+	// Keep separate candidate queues for each category so one category
+	// cannot dominate the first 85 books sent to the store.
+	candidatesByCategory := make(map[string][]store.BulkImportBook)
 	seen := make(map[string]bool)
-	importBooks := make([]store.BulkImportBook, 0, 300)
 
 	for i, plan := range plans {
 		if errorsByPlan[i] != nil {
+			continue
+		}
+
+		category := getPlanCategory(plan, GoogleBookResult{})
+		if !isAllowedDiscoverCategory(category) {
 			continue
 		}
 
@@ -951,18 +995,80 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				publishedYear = &year
 			}
 
-			importBooks = append(importBooks, store.BulkImportBook{
-				Title:         title,
-				Author:        author,
-				Description:   description,
-				CoverURL:      coverURL,
-				PublishedYear: publishedYear,
-				Categories:    plan.Categories,
-				Language:      "th",
-			})
+			candidatesByCategory[category] = append(
+				candidatesByCategory[category],
+				store.BulkImportBook{
+					Title:         title,
+					Author:        author,
+					Description:   description,
+					CoverURL:      coverURL,
+					PublishedYear: publishedYear,
+					Categories:    []string{category},
+					Language:      "th",
+				},
+			)
 		}
 	}
 
+	// Build a balanced list. The category with the lowest ratio to its
+	// target receives the next candidate.
+	categoryOrder := []string{
+		"Romance",
+		"Fantasy",
+		"Mystery",
+		"Young Adult",
+		"Self-Help",
+		"Business",
+		"Biography",
+		"Children",
+		"Horror",
+		"Science Fiction",
+		"Adventure",
+		"Historical Fiction",
+		"Poetry",
+		"Education",
+		"Thriller",
+	}
+
+	categoryCounts := make(map[string]int)
+	categoryIndexes := make(map[string]int)
+	importBooks := make([]store.BulkImportBook, 0, 100)
+
+	for len(importBooks) < 100 {
+		bestCategory := ""
+		bestRatio := 2.0
+
+		for _, category := range categoryOrder {
+			target := categoryTargets[category]
+			index := categoryIndexes[category]
+
+			if target <= 0 || categoryCounts[category] >= target {
+				continue
+			}
+
+			if index >= len(candidatesByCategory[category]) {
+				continue
+			}
+
+			ratio := float64(categoryCounts[category]) / float64(target)
+			if bestCategory == "" || ratio < bestRatio {
+				bestCategory = category
+				bestRatio = ratio
+			}
+		}
+
+		if bestCategory == "" {
+			break
+		}
+
+		index := categoryIndexes[bestCategory]
+		importBooks = append(importBooks, candidatesByCategory[bestCategory][index])
+		categoryIndexes[bestCategory]++
+		categoryCounts[bestCategory]++
+	}
+
+	// The store method independently checks that exactly 85 target rows
+	// exist and at least 85 valid unique Thai candidates are available.
 	replaced, skipped, total, remaining, stats, err :=
 		h.Store.AdminReplaceNonThaiBooks(r.Context(), importBooks)
 
@@ -977,6 +1083,7 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		"found":               len(importBooks),
 		"thai_candidates":     len(importBooks),
 		"foreign_candidates":  0,
+		"category_counts":     categoryCounts,
 		"replaced":            replaced,
 		"skipped":             skipped,
 		"skip_reasons":        stats,
