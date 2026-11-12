@@ -57,6 +57,7 @@ type bulkSearchPlan struct {
 	Language   string
 	Subject    string
 	Categories []string
+	Target     int
 }
 
 // HomeExternalBook คือข้อมูลหนังสือจาก Google Books
@@ -284,45 +285,60 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	plans := []bulkSearchPlan{
+		// หนังสือไทย: นิยายฮีลใจ / Feel-good
 		{
-			Query:      "นิยายรัก วัยรุ่น",
+			Query:      "นิยายฮีลใจ feel good นิยายอบอุ่น",
 			Language:   "th",
-			Subject:    "Romance",
-			Categories: []string{"Romance"},
+			Categories: []string{"นิยายฮีลใจ", "Feel-good"},
+			Target:     10,
 		},
+
+		// หนังสือไทย: มังงะและการ์ตูน
 		{
-			Query:      "มังงะ การ์ตูน",
+			Query:      "มังงะ การ์ตูนญี่ปุ่น ภาษาไทย",
 			Language:   "th",
 			Subject:    "Comics & Graphic Novels",
-			Categories: []string{"Manga"},
+			Categories: []string{"มังงะ", "การ์ตูน"},
+			Target:     10,
 		},
+
+		// หนังสือไทย: จิตวิทยาและพัฒนาตนเอง
 		{
-			Query:      "หนังสือฮีลใจ",
+			Query:      "จิตวิทยา พัฒนาตนเอง เข้าใจตัวเอง",
 			Language:   "th",
+			Categories: []string{"จิตวิทยา", "พัฒนาตนเอง"},
+			Target:     10,
+		},
+
+		// หนังสือต่างประเทศ: Romance
+		{
+			Query:      "young adult romance contemporary novels",
+			Language:   "en",
+			Subject:    "Romance",
+			Categories: []string{"Romance"},
+			Target:     15,
+		},
+
+		// หนังสือต่างประเทศ: Manga
+		{
+			Query:      "manga graphic novels popular",
+			Language:   "en",
+			Subject:    "Comics & Graphic Novels",
+			Categories: []string{"Manga"},
+			Target:     15,
+		},
+
+		// หนังสือต่างประเทศ: Feel-good และ Fiction
+		{
+			Query:      "healing feel good fiction fantasy novels",
+			Language:   "en",
 			Subject:    "Fiction",
-			Categories: []string{"Fiction"},
-		},
-		{
-			Query:      "young adult romance novels",
-			Language:   "en",
-			Subject:    "Romance",
-			Categories: []string{"Romance"},
-		},
-		{
-			Query:      "manga graphic novels",
-			Language:   "en",
-			Subject:    "Comics & Graphic Novels",
-			Categories: []string{"Manga"},
-		},
-		{
-			Query:      "fantasy fiction novels",
-			Language:   "en",
-			Subject:    "Fantasy",
-			Categories: []string{"Fantasy"},
+			Categories: []string{"Feel-good", "Fiction"},
+			Target:     15,
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
 	resultsByPlan := make([][]GoogleBookResult, len(plans))
@@ -362,16 +378,23 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 
+	if ctx.Err() != nil {
+		writeError(w, http.StatusGatewayTimeout, "Google Books search timed out")
+		return
+	}
+
 	books := make([]HomeExternalBook, 0, 100)
 	seen := make(map[string]bool)
 	successfulSearches := 0
 
+	// เพิ่มหนังสือไทยก่อน แล้วจึงเพิ่มหนังสือต่างประเทศ
 	for i, plan := range plans {
 		if errorsByPlan[i] != nil {
 			continue
 		}
 
 		successfulSearches++
+		addedFromPlan := 0
 
 		for _, result := range resultsByPlan[i] {
 			if result.GoogleBooksID == "" {
@@ -382,7 +405,10 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 			author := strings.TrimSpace(result.Author)
 			coverURL := normalizeCoverURL(result.CoverURL)
 
-			if title == "" || author == "" || !isValidCoverURL(coverURL) {
+			if title == "" ||
+				author == "" ||
+				!isValidCoverURL(coverURL) ||
+				isPeriodical(title) {
 				continue
 			}
 
@@ -397,11 +423,6 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 
 			seen[key] = true
 
-			categories := result.Categories
-			if len(categories) == 0 {
-				categories = plan.Categories
-			}
-
 			books = append(books, HomeExternalBook{
 				ID:            "google_" + result.GoogleBooksID,
 				Source:        "google_books",
@@ -410,10 +431,12 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 				Description:   result.Description,
 				CoverURL:      coverURL,
 				PublishedYear: result.PublishedYear,
-				Categories:    categories,
+				Categories:    plan.Categories,
 			})
 
-			if len(books) >= 100 {
+			addedFromPlan++
+
+			if addedFromPlan >= plan.Target || len(books) >= 100 {
 				break
 			}
 		}
