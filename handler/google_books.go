@@ -1,4 +1,3 @@
-
 package handler
 
 import (
@@ -8,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Supattarblue/bookmellow-backend/store"
@@ -89,7 +89,7 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	params.Set("q", searchQuery)
 	params.Set("maxResults", "40")
 	params.Set("printType", "books")
-	params.Set("orderBy", "newest")
+	params.Set("orderBy", "relevance")
 	params.Set("key", h.GoogleBooksAPIKey)
 
 	if lang == "th" || lang == "en" {
@@ -152,18 +152,18 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 			coverURL = info.ImageLinks.SmallThumbnail
 		}
 
-		if coverURL == "" || isPeriodical(title) {
+		coverURL = normalizeCoverURL(coverURL)
+
+		if !isValidCoverURL(coverURL) || isPeriodical(title) {
 			continue
 		}
-
-		coverURL = strings.Replace(coverURL, "http://", "https://", 1)
 
 		results = append(results, GoogleBookResult{
 			GoogleBooksID: item.ID,
 			Title:         title,
 			Author:        author,
 			Authors:       info.Authors,
-			Description:   info.Description,
+			Description:   strings.TrimSpace(info.Description),
 			CoverURL:      coverURL,
 			PublishedDate: info.PublishedDate,
 			PublishedYear: extractPublishedYear(info.PublishedDate),
@@ -175,6 +175,22 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 		"data":  results,
 		"total": len(results),
 	})
+}
+
+func normalizeCoverURL(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Replace(value, "http://", "https://", 1)
+	value = strings.ReplaceAll(value, "&amp;", "&")
+	return value
+}
+
+func isValidCoverURL(value string) bool {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil {
+		return false
+	}
+
+	return parsed.Scheme == "https" && parsed.Host != ""
 }
 
 func isPeriodical(title string) bool {
@@ -192,6 +208,8 @@ func isPeriodical(title string) bool {
 		"newspaper",
 		"weekly",
 		"monthly journal",
+		"periodical",
+		"newsletter",
 	}
 
 	for _, keyword := range keywords {
@@ -211,6 +229,7 @@ func extractPublishedYear(date string) int {
 	}
 
 	var year int
+
 	if _, err := fmt.Sscanf(date[:4], "%d", &year); err != nil {
 		return 0
 	}
@@ -239,65 +258,183 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 
 	plans := []bulkSearchPlan{
 		// Thai books
-		{"มังงะ การ์ตูน", "th", "Comics & Graphic Novels", []string{"Young Adult", "Adventure"}},
-		{"นิยายรัก", "th", "Romance", []string{"Romance"}},
-		{"นิยายวาย BL", "th", "Romance", []string{"Romance", "Young Adult"}},
-		{"นิยายยูริ GL", "th", "Romance", []string{"Romance", "Young Adult"}},
-		{"หนังสือฮีลใจ feel good", "th", "Fiction", []string{"Young Adult"}},
-		{"นิยายแฟนตาซี", "th", "Fantasy", []string{"Fantasy", "Adventure"}},
-		{"นิยายสืบสวน", "th", "Mystery", []string{"Mystery", "Thriller"}},
-		{"จิตวิทยา", "th", "Psychology", []string{"Self-Help"}},
-		{"พัฒนาตนเอง", "th", "Self-Help", []string{"Self-Help"}},
+		{
+			Query:      "มังงะ การ์ตูน",
+			Language:   "th",
+			Subject:    "Comics & Graphic Novels",
+			Categories: []string{"Young Adult", "Adventure"},
+		},
+		{
+			Query:      "นิยายรัก",
+			Language:   "th",
+			Subject:    "Romance",
+			Categories: []string{"Romance"},
+		},
+		{
+			Query:      "นิยายวาย BL",
+			Language:   "th",
+			Subject:    "Romance",
+			Categories: []string{"Romance", "Young Adult"},
+		},
+		{
+			Query:      "นิยายยูริ GL",
+			Language:   "th",
+			Subject:    "Romance",
+			Categories: []string{"Romance", "Young Adult"},
+		},
+		{
+			Query:      "หนังสือฮีลใจ feel good",
+			Language:   "th",
+			Subject:    "Fiction",
+			Categories: []string{"Young Adult"},
+		},
+		{
+			Query:      "นิยายแฟนตาซี",
+			Language:   "th",
+			Subject:    "Fantasy",
+			Categories: []string{"Fantasy", "Adventure"},
+		},
+		{
+			Query:      "นิยายสืบสวน",
+			Language:   "th",
+			Subject:    "Mystery",
+			Categories: []string{"Mystery", "Thriller"},
+		},
+		{
+			Query:      "จิตวิทยา",
+			Language:   "th",
+			Subject:    "Psychology",
+			Categories: []string{"Self-Help"},
+		},
+		{
+			Query:      "พัฒนาตนเอง",
+			Language:   "th",
+			Subject:    "Self-Help",
+			Categories: []string{"Self-Help"},
+		},
 
-		// English books
-		{"manga graphic novels", "en", "Comics & Graphic Novels", []string{"Young Adult", "Adventure"}},
-		{"romance novels", "en", "Romance", []string{"Romance"}},
-		{"fantasy adventure novels", "en", "Fantasy", []string{"Fantasy", "Adventure"}},
-		{"mystery thriller novels", "en", "Mystery", []string{"Mystery", "Thriller"}},
-		{"healing feel good books", "en", "Fiction", []string{"Young Adult"}},
-		{"psychology books", "en", "Psychology", []string{"Self-Help"}},
-		{"self improvement books", "en", "Self-Help", []string{"Self-Help"}},
+		// Foreign books
+		{
+			Query:      "manga graphic novels",
+			Language:   "en",
+			Subject:    "Comics & Graphic Novels",
+			Categories: []string{"Young Adult", "Adventure"},
+		},
+		{
+			Query:      "romance novels",
+			Language:   "en",
+			Subject:    "Romance",
+			Categories: []string{"Romance"},
+		},
+		{
+			Query:      "fantasy adventure novels",
+			Language:   "en",
+			Subject:    "Fantasy",
+			Categories: []string{"Fantasy", "Adventure"},
+		},
+		{
+			Query:      "mystery thriller novels",
+			Language:   "en",
+			Subject:    "Mystery",
+			Categories: []string{"Mystery", "Thriller"},
+		},
+		{
+			Query:      "healing feel good books",
+			Language:   "en",
+			Subject:    "Fiction",
+			Categories: []string{"Young Adult"},
+		},
+		{
+			Query:      "psychology books",
+			Language:   "en",
+			Subject:    "Psychology",
+			Categories: []string{"Self-Help"},
+		},
+		{
+			Query:      "self improvement books",
+			Language:   "en",
+			Subject:    "Self-Help",
+			Categories: []string{"Self-Help"},
+		},
+	}
+
+	// จำกัดเวลาค้นหาทั้งหมด และจำกัดงานพร้อมกันไม่เกิน 4 คำค้นหา
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+
+	resultsByPlan := make([][]GoogleBookResult, len(plans))
+	errorsByPlan := make([]error, len(plans))
+
+	semaphore := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+
+	for i, plan := range plans {
+		wg.Add(1)
+
+		go func(index int, currentPlan bulkSearchPlan) {
+			defer wg.Done()
+
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				errorsByPlan[index] = ctx.Err()
+				return
+			}
+
+			defer func() {
+				<-semaphore
+			}()
+
+			results, err := h.fetchGoogleBooksForImport(
+				ctx,
+				currentPlan.Query,
+				currentPlan.Language,
+				currentPlan.Subject,
+			)
+
+			resultsByPlan[index] = results
+			errorsByPlan[index] = err
+		}(i, plan)
+	}
+
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		writeError(w, http.StatusGatewayTimeout, "Google Books search timed out")
+		return
+	}
+
+	successfulSearches := 0
+
+	for _, searchErr := range errorsByPlan {
+		if searchErr == nil {
+			successfulSearches++
+		}
+	}
+
+	if successfulSearches == 0 {
+		writeError(w, http.StatusBadGateway, "All Google Books searches failed")
+		return
 	}
 
 	seen := make(map[string]bool)
-	importBooks := make([]store.BulkImportBook, 0, 90)
+	importBooks := make([]store.BulkImportBook, 0, 300)
 
-	thaiCount := 0
-	englishCount := 0
-
-	for _, plan := range plans {
-		if plan.Language == "th" && thaiCount >= 70 {
-			continue
-		}
-		if plan.Language == "en" && englishCount >= 20 {
+	for i, plan := range plans {
+		if errorsByPlan[i] != nil {
 			continue
 		}
 
-		results, err := h.fetchGoogleBooksForImport(
-			r.Context(),
-			plan.Query,
-			plan.Language,
-			plan.Subject,
-		)
-		if err != nil {
-			internal(w, err)
-			return
-		}
-
-		for _, result := range results {
-			if plan.Language == "th" && thaiCount >= 70 {
-				break
-			}
-			if plan.Language == "en" && englishCount >= 20 {
-				break
-			}
-
+		for _, result := range resultsByPlan[i] {
 			title := strings.TrimSpace(result.Title)
 			author := strings.TrimSpace(result.Author)
 			description := strings.TrimSpace(result.Description)
-			coverURL := strings.TrimSpace(result.CoverURL)
+			coverURL := normalizeCoverURL(result.CoverURL)
 
-			if title == "" || author == "" || coverURL == "" || description == "" {
+			if title == "" ||
+				author == "" ||
+				description == "" ||
+				!isValidCoverURL(coverURL) {
 				continue
 			}
 
@@ -305,13 +442,19 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			key := strings.ToLower(title + "|" + author)
+			key := strings.ToLower(
+				strings.Join(strings.Fields(title), " ") + "|" +
+					strings.Join(strings.Fields(author), " "),
+			)
+
 			if seen[key] {
 				continue
 			}
+
 			seen[key] = true
 
 			var publishedYear *int
+
 			if result.PublishedYear > 0 {
 				year := result.PublishedYear
 				publishedYear = &year
@@ -324,27 +467,12 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 				CoverURL:      coverURL,
 				PublishedYear: publishedYear,
 				Categories:    plan.Categories,
+				Language:      plan.Language,
 			})
-
-			if plan.Language == "th" {
-				thaiCount++
-			} else {
-				englishCount++
-			}
 		}
 	}
 
-	if len(importBooks) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"message":  "No suitable books were found",
-			"inserted": 0,
-			"skipped":  0,
-			"total":    0,
-			"remaining": 100,
-		})
-		return
-	}
-
+	// ให้ Store ตรวจหนังสือเดิม หนังสือซ้ำ และเพดาน 100 เล่ม
 	inserted, skipped, total, err := h.Store.AdminBulkImportBooks(
 		r.Context(),
 		importBooks,
@@ -360,12 +488,13 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"message":   "Bulk import completed",
-		"found":     len(importBooks),
-		"inserted":  inserted,
-		"skipped":   skipped,
-		"total":     total,
-		"remaining": remaining,
+		"message":             "Bulk import completed",
+		"successful_searches": successfulSearches,
+		"found":               len(importBooks),
+		"inserted":            inserted,
+		"skipped":             skipped,
+		"total":               total,
+		"remaining":           remaining,
 	})
 }
 
@@ -376,6 +505,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 	subject string,
 ) ([]GoogleBookResult, error) {
 	searchQuery := query
+
 	if subject != "" {
 		searchQuery += " subject:" + subject
 	}
@@ -384,13 +514,13 @@ func (h *Handler) fetchGoogleBooksForImport(
 	params.Set("q", searchQuery)
 	params.Set("maxResults", "40")
 	params.Set("printType", "books")
-	params.Set("orderBy", "newest")
+	params.Set("orderBy", "relevance")
 	params.Set("langRestrict", lang)
 	params.Set("key", h.GoogleBooksAPIKey)
 
 	requestURL := googleBooksURL + "?" + params.Encode()
 
-	requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(
@@ -404,7 +534,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 	}
 
 	client := &http.Client{
-		Timeout: 15 * time.Second,
+		Timeout: 12 * time.Second,
 	}
 
 	resp, err := client.Do(req)
@@ -414,15 +544,19 @@ func (h *Handler) fetchGoogleBooksForImport(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Google Books API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf(
+			"Google Books API returned status %d",
+			resp.StatusCode,
+		)
 	}
 
 	var googleResponse GoogleBooksResponse
+
 	if err := json.NewDecoder(resp.Body).Decode(&googleResponse); err != nil {
 		return nil, err
 	}
 
-	results := make([]GoogleBookResult, 0)
+	results := make([]GoogleBookResult, 0, len(googleResponse.Items))
 
 	for _, item := range googleResponse.Items {
 		info := item.VolumeInfo
@@ -435,7 +569,11 @@ func (h *Handler) fetchGoogleBooksForImport(
 			coverURL = info.ImageLinks.SmallThumbnail
 		}
 
-		if title == "" || strings.TrimSpace(author) == "" || coverURL == "" {
+		coverURL = normalizeCoverURL(coverURL)
+
+		if title == "" ||
+			strings.TrimSpace(author) == "" ||
+			!isValidCoverURL(coverURL) {
 			continue
 		}
 
@@ -443,14 +581,12 @@ func (h *Handler) fetchGoogleBooksForImport(
 			continue
 		}
 
-		coverURL = strings.Replace(coverURL, "http://", "https://", 1)
-
 		results = append(results, GoogleBookResult{
 			GoogleBooksID: item.ID,
 			Title:         title,
 			Author:        author,
 			Authors:       info.Authors,
-			Description:   info.Description,
+			Description:   strings.TrimSpace(info.Description),
 			CoverURL:      coverURL,
 			PublishedDate: info.PublishedDate,
 			PublishedYear: extractPublishedYear(info.PublishedDate),
