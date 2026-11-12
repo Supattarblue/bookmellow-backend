@@ -171,15 +171,7 @@ func isLowQualityDiscoverBook(result GoogleBookResult) bool {
 		"research report", "dissertation", "thesis",
 	}
 
-	if containsAny(text, excluded) {
-		return true
-	}
-
-	if result.PublishedYear > 0 && result.PublishedYear < 2005 {
-		return true
-	}
-
-	return false
+	return containsAny(text, excluded)
 }
 
 func isAdultRomance(text string) bool {
@@ -202,10 +194,6 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 		return false
 	}
 
-	if !hasThaiText(result.Title) {
-		return false
-	}
-
 	if isPeriodical(title) || isLowQualityDiscoverBook(result) {
 		return false
 	}
@@ -224,7 +212,7 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 
 	case "fantasy":
 		return containsAny(text, []string{
-			"แฟนตาซี", "เวทมนตร์", "เวทมนต์", "魔法",
+			"แฟนตาซี", "เวทมนตร์", "เวทมนต์",
 			"มังกร", "อาณาจักร", "fantasy",
 		})
 
@@ -272,14 +260,13 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 		})
 
 	case "thai fiction", "translated fiction":
-		return hasThaiText(result.Title) &&
-			!containsAny(text, []string{
-				"ข้อสอบ", "เตรียมสอบ", "ตำราเรียน",
-				"วิทยานิพนธ์", "แบบเรียน",
-			})
+		return !containsAny(text, []string{
+			"ข้อสอบ", "เตรียมสอบ", "ตำราเรียน",
+			"วิทยานิพนธ์", "แบบเรียน",
+		})
 	}
 
-	return false
+	return true
 }
 
 func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request) {
@@ -391,8 +378,8 @@ func (h *Handler) AdminSearchGoogleBooks(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// DiscoverBooks ค้นหาหนังสือภาษาไทยสำหรับหน้า Home
-// ไม่บันทึกข้อมูลลง Supabase
+// DiscoverBooks ค้นหาหนังสือจาก Google Books สำหรับหน้า Home
+// ฟังก์ชันนี้ไม่บันทึกข้อมูลลง Supabase
 func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	if h.GoogleBooksAPIKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "Google Books API key is not configured")
@@ -477,7 +464,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 			googleID := strings.TrimSpace(result.GoogleBooksID)
 
 			if title == "" || author == "" || googleID == "" ||
-				!hasThaiText(title) || !isValidCoverURL(coverURL) {
+				!isValidCoverURL(coverURL) {
 				continue
 			}
 

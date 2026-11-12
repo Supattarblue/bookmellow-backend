@@ -3,8 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
-	"unicode"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -87,7 +87,7 @@ func (s *Store) AdminUpdateMember(ctx context.Context, id, username, email strin
 		&user.Role,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
@@ -113,7 +113,7 @@ func (s *Store) AdminSetRole(ctx context.Context, id, role string) error {
 	`, id).Scan(&currentRole)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
@@ -167,7 +167,7 @@ func (s *Store) AdminDeleteMember(ctx context.Context, id string) error {
 	`, id).Scan(&role)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
@@ -211,7 +211,6 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 	}
 	defer tx.Rollback(ctx)
 
-	// ใช้ล็อกเดียวกับ Bulk Import เพื่อป้องกันการเพิ่มเกิน 100 เล่ม
 	_, err = tx.Exec(ctx, `
 		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
 	`)
@@ -385,7 +384,7 @@ func (s *Store) AdminDeleteBook(ctx context.Context, id string) error {
 	return nil
 }
 
-// AdminBulkBook represents one book and its categories for bulk import.
+// AdminBulkBook represents one book and its categories.
 type AdminBulkBook struct {
 	Book        Book
 	CategoryIDs []string
@@ -397,7 +396,7 @@ func (s *Store) AdminBulkCreateBooks(
 	items []AdminBulkBook,
 	maxBooks int,
 ) (int, int, error) {
-	if maxBooks <= 0 {
+	if maxBooks <= 0 || maxBooks > 100 {
 		maxBooks = 100
 	}
 
@@ -517,18 +516,8 @@ type BulkImportBook struct {
 	Language      string
 }
 
-// containsThai checks whether text contains Thai characters.
-func containsThai(value string) bool {
-	for _, r := range value {
-		if unicode.In(r, unicode.Thai) {
-			return true
-		}
-	}
-	return false
-}
-
-// AdminBulkImportBooks imports books while enforcing the 100-book limit
-// and approximate Thai/foreign catalog targets.
+// AdminBulkImportBooks imports books while preserving existing records
+// and enforcing a maximum catalog size of 100 books.
 func (s *Store) AdminBulkImportBooks(
 	ctx context.Context,
 	books []BulkImportBook,
@@ -539,7 +528,6 @@ func (s *Store) AdminBulkImportBooks(
 	}
 	defer tx.Rollback(ctx)
 
-	// ใช้ล็อกตารางเดียวกับการเพิ่มหนังสือทีละเล่ม
 	_, err = tx.Exec(ctx, `
 		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
 	`)
@@ -556,38 +544,6 @@ func (s *Store) AdminBulkImportBooks(
 		return 0, 0, 0, err
 	}
 
-	// ประเมินภาษาในหนังสือเดิมจากชื่อหนังสือ
-	rows, err := tx.Query(ctx, `
-		SELECT title FROM books
-	`)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-
-	thaiCount := 0
-	foreignCount := 0
-
-	for rows.Next() {
-		var title string
-
-		if err := rows.Scan(&title); err != nil {
-			rows.Close()
-			return 0, 0, 0, err
-		}
-
-		if containsThai(title) {
-			thaiCount++
-		} else {
-			foreignCount++
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, 0, 0, err
-	}
-	rows.Close()
-
 	inserted := 0
 	skipped := 0
 
@@ -601,7 +557,6 @@ func (s *Store) AdminBulkImportBooks(
 		book.Author = strings.TrimSpace(book.Author)
 		book.Description = strings.TrimSpace(book.Description)
 		book.CoverURL = strings.TrimSpace(book.CoverURL)
-		book.Language = strings.ToLower(strings.TrimSpace(book.Language))
 
 		if book.Title == "" ||
 			book.Author == "" ||
@@ -611,27 +566,10 @@ func (s *Store) AdminBulkImportBooks(
 			continue
 		}
 
-		if !strings.HasPrefix(book.CoverURL, "https://") &&
-			!strings.HasPrefix(book.CoverURL, "http://") {
-			skipped++
-			continue
-		}
-
-		// ใช้ภาษาที่ Handler ส่งมา หากไม่มีให้ประมาณจากชื่อ
-		if book.Language != "th" && book.Language != "en" {
-			if containsThai(book.Title) {
-				book.Language = "th"
-			} else {
-				book.Language = "en"
-			}
-		}
-
-		if book.Language == "th" && thaiCount >= 70 {
-			skipped++
-			continue
-		}
-
-		if book.Language == "en" && foreignCount >= 30 {
+		parsedURL, parseErr := url.ParseRequestURI(book.CoverURL)
+		if parseErr != nil ||
+			parsedURL.Scheme != "https" ||
+			parsedURL.Host == "" {
 			skipped++
 			continue
 		}
@@ -692,12 +630,12 @@ func (s *Store) AdminBulkImportBooks(
 			err = tx.QueryRow(ctx, `
 				SELECT id
 				FROM categories
-				WHERE LOWER(name) = LOWER($1)
+				WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
 				LIMIT 1
 			`, categoryName).Scan(&categoryID)
 
 			if err != nil {
-				if err == pgx.ErrNoRows {
+				if errors.Is(err, pgx.ErrNoRows) {
 					continue
 				}
 				return 0, 0, 0, err
@@ -716,12 +654,6 @@ func (s *Store) AdminBulkImportBooks(
 
 		inserted++
 		total++
-
-		if book.Language == "th" {
-			thaiCount++
-		} else {
-			foreignCount++
-		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
