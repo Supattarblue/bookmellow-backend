@@ -1,3 +1,4 @@
+
 package handler
 
 import (
@@ -217,13 +218,10 @@ func isRelevantDiscoverBook(result GoogleBookResult, plan bulkSearchPlan) bool {
 		return false
 	}
 
-	// ต้องมีข้อความภาษาไทยอย่างน้อยในชื่อหรือคำอธิบาย
 	if !hasThaiText(title) && !hasThaiText(description) {
 		return false
 	}
 
-	// หาก Google ระบุภาษาไว้ชัดเจนว่าไม่ใช่ภาษาไทย ให้ตัดออก
-	// แต่ถ้า Google ไม่ระบุภาษา จะพิจารณาจากข้อความภาษาไทยแทน
 	if result.Language != "" && !strings.EqualFold(result.Language, "th") {
 		return false
 	}
@@ -459,8 +457,6 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	plans := []bulkSearchPlan{
 		{Query: "นิยายรักไทย", Language: "th", Categories: []string{"Romance"}},
 		{Query: "นิยายโรแมนติกไทย", Language: "th", Categories: []string{"Romance"}},
-		{Query: "นิยายความรัก ภาษาไทย", Language: "th", Categories: []string{"Romance"}},
-		{Query: "นิยายวายไทย", Language: "th", Categories: []string{"Romance"}},
 
 		{Query: "นิยายแฟนตาซีไทย", Language: "th", Categories: []string{"Fantasy"}},
 		{Query: "นิยายกำลังภายใน แฟนตาซี", Language: "th", Categories: []string{"Fantasy"}},
@@ -482,6 +478,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 
 		{Query: "นิทานเด็กไทย", Language: "th", Categories: []string{"Children"}},
 		{Query: "หนังสือสำหรับเด็ก ภาษาไทย", Language: "th", Categories: []string{"Children"}},
+		{Query: "วรรณกรรมเด็กไทย นิทานภาพ", Language: "th", Categories: []string{"Children"}},
 
 		{Query: "นิยายสยองขวัญไทย", Language: "th", Categories: []string{"Horror"}},
 		{Query: "เรื่องผีไทย หนังสือ", Language: "th", Categories: []string{"Horror"}},
@@ -497,6 +494,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 
 		{Query: "บทกวีไทย กวีนิพนธ์", Language: "th", Categories: []string{"Poetry"}},
 		{Query: "รวมบทกลอน ภาษาไทย", Language: "th", Categories: []string{"Poetry"}},
+		{Query: "รวมบทกวี วรรณกรรมไทย", Language: "th", Categories: []string{"Poetry"}},
 
 		{Query: "หนังสือการศึกษา ภาษาไทย", Language: "th", Categories: []string{"Education"}},
 		{Query: "หนังสือความรู้ ภาษาไทย", Language: "th", Categories: []string{"Education"}},
@@ -607,9 +605,9 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 	seenTitles := make(map[string]bool)
 	categoryCounts := make(map[string]int)
 
-	addCandidate := func(candidate discoverCandidate) {
+	addCandidate := func(candidate discoverCandidate) bool {
 		if len(books) >= 100 {
-			return
+			return false
 		}
 
 		result := candidate.result
@@ -621,27 +619,27 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		category := candidate.category
 
 		if title == "" || author == "" || googleID == "" {
-			return
+			return false
 		}
 
 		if !isAllowedDiscoverCategory(category) {
-			return
+			return false
 		}
 
 		if len([]rune(description)) < 35 ||
 			!hasThaiText(description) ||
 			!isValidCoverURL(coverURL) {
-			return
+			return false
 		}
 
 		if isAdultRomance(title+" "+description) ||
 			isLowQualityDiscoverBook(result) ||
 			isPeriodical(title) {
-			return
+			return false
 		}
 
 		if seenIDs[googleID] {
-			return
+			return false
 		}
 
 		key := strings.ToLower(
@@ -650,7 +648,7 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 		)
 
 		if seenTitles[key] {
-			return
+			return false
 		}
 
 		seenIDs[googleID] = true
@@ -667,10 +665,14 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 			PublishedYear: result.PublishedYear,
 			Categories:    []string{category},
 		})
+
+		return true
 	}
 
-	// รอบแรก: เติมตามโควตาของแต่ละหมวด
-	for _, candidate := range candidates {
+	// รอบแรก: เติมหนังสือให้แต่ละหมวดตามโควตาที่กำหนด
+	candidateUsed := make([]bool, len(candidates))
+
+	for i, candidate := range candidates {
 		if len(books) >= 100 {
 			break
 		}
@@ -680,19 +682,43 @@ func (h *Handler) DiscoverBooks(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		candidateUsed[i] = true
 		addCandidate(candidate)
 	}
 
-	// รอบสอง: หากบางหมวดมีหนังสือไม่พอ ให้ใช้ผลลัพธ์จากหมวดอื่นเติม
-	// โดยยังคงใช้เฉพาะ 15 หมวดที่อนุญาต และไม่เกิน 100 เล่ม
-	if len(books) < 100 {
-		for _, candidate := range candidates {
-			if len(books) >= 100 {
-				break
+	// รอบสอง: เลือกหมวดที่มีสัดส่วนต่ำกว่าโควตามากที่สุดก่อน
+	// เพื่อไม่ให้ Romance หรือหมวดที่มีผลค้นหามากครองรายการส่วนที่เหลือ
+	for len(books) < 100 {
+		bestIndex := -1
+		bestRatio := 999.0
+
+		for i, candidate := range candidates {
+			if candidateUsed[i] {
+				continue
 			}
 
-			addCandidate(candidate)
+			category := candidate.category
+			target := categoryTargets[category]
+
+			if target <= 0 {
+				candidateUsed[i] = true
+				continue
+			}
+
+			ratio := float64(categoryCounts[category]) / float64(target)
+
+			if bestIndex == -1 || ratio < bestRatio {
+				bestIndex = i
+				bestRatio = ratio
+			}
 		}
+
+		if bestIndex == -1 {
+			break
+		}
+
+		candidateUsed[bestIndex] = true
+		addCandidate(candidates[bestIndex])
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -722,10 +748,6 @@ func (h *Handler) fetchGoogleBooksForDiscover(
 	params.Set("maxResults", "40")
 	params.Set("printType", "books")
 	params.Set("orderBy", "relevance")
-
-	// ไม่ใส่ langRestrict ใน Discover
-	// เพราะ Google Books อาจตัดหนังสือภาษาไทยบางรายการออก
-	// แม้ข้อมูลชื่อหรือคำอธิบายจะเป็นภาษาไทยก็ตาม
 	params.Set("key", h.GoogleBooksAPIKey)
 
 	requestURL := googleBooksURL + "?" + params.Encode()
@@ -776,12 +798,10 @@ func (h *Handler) fetchGoogleBooksForDiscover(
 			continue
 		}
 
-		// ถ้าระบุภาษาเป็นภาษาอื่นอย่างชัดเจน ไม่รับเข้ารายการ
 		if language != "" && language != "th" {
 			continue
 		}
 
-		// ถ้า Google ไม่ระบุภาษา ให้ตรวจจากชื่อและคำอธิบาย
 		if language == "" {
 			if !hasThaiText(title) && !hasThaiText(description) {
 				continue
@@ -943,8 +963,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ฟังก์ชันนี้จะเปลี่ยนข้อมูลหนังสือเดิมในฐานข้อมูล
-	// จึงต้องผ่านการตรวจสอบ candidate ให้ครบก่อนเรียกใช้งาน
 	replaced, skipped, total, remaining, stats, err :=
 		h.Store.AdminReplaceNonThaiBooks(r.Context(), importBooks)
 
