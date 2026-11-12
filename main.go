@@ -125,6 +125,10 @@ func run() error {
 		mw.RequireLogin(issuer, http.HandlerFunc(h.RemoveFavorite)),
 	)
 
+	// Books
+	mux.HandleFunc("GET /api/books", h.ListBooks)
+	mux.HandleFunc("GET /api/books/discover", h.DiscoverBooks)
+	mux.HandleFunc("GET /api/books/{id}", h.GetBook)
 	// Reviews
 	mux.HandleFunc("GET /api/books/{id}/reviews", h.ListReviews)
 	mux.Handle("POST /api/books/{id}/reviews",
