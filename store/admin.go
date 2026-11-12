@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -359,4 +360,264 @@ func (s *Store) AdminDeleteBook(ctx context.Context, id string) error {
 	}
 
 	return nil
+}
+
+// AdminBulkBook represents one book and its categories for bulk import.
+type AdminBulkBook struct {
+	Book        Book
+	CategoryIDs []string
+}
+
+// AdminBulkCreateBooks imports multiple books in one transaction.
+// Duplicate books are skipped and the total catalog is capped at maxBooks.
+func (s *Store) AdminBulkCreateBooks(
+	ctx context.Context,
+	items []AdminBulkBook,
+	maxBooks int,
+) (int, int, error) {
+	if maxBooks <= 0 {
+		maxBooks = 100
+	}
+
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Prevent concurrent inserts from exceeding the catalog limit.
+	_, err = tx.Exec(ctx, `
+		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var currentCount int
+
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM books
+	`).Scan(&currentCount)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	added := 0
+	skipped := 0
+
+	for _, item := range items {
+		book := item.Book
+
+		book.Title = strings.TrimSpace(book.Title)
+		book.Author = strings.TrimSpace(book.Author)
+
+		if book.Title == "" || book.Author == "" {
+			skipped++
+			continue
+		}
+
+		if currentCount >= maxBooks {
+			skipped++
+			continue
+		}
+
+		var exists bool
+
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM books
+				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
+				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
+			)
+		`, book.Title, book.Author).Scan(&exists)
+
+		if err != nil {
+			return 0, 0, err
+		}
+
+		if exists {
+			skipped++
+			continue
+		}
+
+		err = tx.QueryRow(ctx, `
+			INSERT INTO books (
+				title,
+				author,
+				description,
+				cover_url,
+				published_year
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id
+		`,
+			book.Title,
+			book.Author,
+			book.Description,
+			book.CoverURL,
+			book.PublishedYear,
+		).Scan(&book.ID)
+
+		if err != nil {
+			return 0, 0, err
+		}
+
+		for _, categoryID := range item.CategoryIDs {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO book_categories (book_id, category_id)
+				VALUES ($1, $2)
+			`, book.ID, categoryID)
+
+			if err != nil {
+				return 0, 0, err
+			}
+		}
+
+		added++
+		currentCount++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, err
+	}
+
+	return added, skipped, nil
+}
+
+type BulkImportBook struct {
+	Title         string
+	Author        string
+	Description   string
+	CoverURL      string
+	PublishedYear *int
+	Categories    []string
+}
+
+func (s *Store) AdminBulkImportBooks(
+	ctx context.Context,
+	books []BulkImportBook,
+) (int, int, int, error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	// ป้องกันการนำเข้าหลายชุดพร้อมกัน
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(100100)`)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	var total int
+
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM books
+	`).Scan(&total)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	inserted := 0
+	skipped := 0
+
+	for _, book := range books {
+		if total >= 100 {
+			skipped++
+			continue
+		}
+
+		book.Title = strings.TrimSpace(book.Title)
+		book.Author = strings.TrimSpace(book.Author)
+		book.CoverURL = strings.TrimSpace(book.CoverURL)
+
+		if book.Title == "" ||
+			book.Author == "" ||
+			book.CoverURL == "" {
+			skipped++
+			continue
+		}
+
+		var exists bool
+
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM books
+				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
+				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
+			)
+		`, book.Title, book.Author).Scan(&exists)
+
+		if err != nil {
+			return 0, 0, 0, err
+		}
+
+		if exists {
+			skipped++
+			continue
+		}
+
+		var bookID string
+
+		err = tx.QueryRow(ctx, `
+			INSERT INTO books (
+				title,
+				author,
+				description,
+				cover_url,
+				published_year
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id
+		`,
+			book.Title,
+			book.Author,
+			book.Description,
+			book.CoverURL,
+			book.PublishedYear,
+		).Scan(&bookID)
+
+		if err != nil {
+			return 0, 0, 0, err
+		}
+
+		for _, categoryName := range book.Categories {
+			var categoryID string
+
+			err = tx.QueryRow(ctx, `
+				SELECT id
+				FROM categories
+				WHERE LOWER(name) = LOWER($1)
+				LIMIT 1
+			`, strings.TrimSpace(categoryName)).Scan(&categoryID)
+
+			if err != nil {
+				if err == pgx.ErrNoRows {
+					continue
+				}
+				return 0, 0, 0, err
+			}
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO book_categories (book_id, category_id)
+				VALUES ($1, $2)
+				ON CONFLICT DO NOTHING
+			`, bookID, categoryID)
+
+			if err != nil {
+				return 0, 0, 0, err
+			}
+		}
+
+		inserted++
+		total++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, 0, err
+	}
+
+	return inserted, skipped, total, nil
 }

@@ -193,6 +193,9 @@ func run() error {
 	mux.Handle("GET /api/admin/external-books",
 		adminOnly(http.HandlerFunc(h.AdminSearchGoogleBooks)),
 	)
+	mux.Handle("POST /api/admin/books/bulk-import",
+		adminOnly(http.HandlerFunc(h.AdminBulkImportBooks)),
+	)
 
 	// Middleware
 	var serverHandler http.Handler = mux
