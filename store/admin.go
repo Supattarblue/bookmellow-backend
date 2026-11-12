@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -21,8 +24,11 @@ func (s *Store) AdminDashboard(ctx context.Context) (*AdminStats, error) {
 			(SELECT COUNT(*) FROM books),
 			(SELECT COUNT(*) FROM users WHERE role = 'member'),
 			(SELECT COUNT(*) FROM users WHERE role = 'admin')
-	`).Scan(&stats.Books, &stats.Members, &stats.Admins)
-
+	`).Scan(
+		&stats.Books,
+		&stats.Members,
+		&stats.Admins,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +44,6 @@ func (s *Store) AdminListMembers(ctx context.Context, search string) ([]User, er
 		   OR email ILIKE '%' || $1 || '%'
 		ORDER BY created_at DESC
 	`, search)
-
 	if err != nil {
 		return nil, err
 	}
@@ -68,10 +73,7 @@ func (s *Store) AdminGetMember(ctx context.Context, id string) (*User, error) {
 	return s.GetUserByID(ctx, id)
 }
 
-func (s *Store) AdminUpdateMember(
-	ctx context.Context,
-	id, username, email string,
-) (*User, error) {
+func (s *Store) AdminUpdateMember(ctx context.Context, id, username, email string) (*User, error) {
 	var user User
 
 	err := s.DB.QueryRow(ctx, `
@@ -85,7 +87,6 @@ func (s *Store) AdminUpdateMember(
 		&user.Email,
 		&user.Role,
 	)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -203,12 +204,7 @@ func (s *Store) AdminDeleteMember(ctx context.Context, id string) error {
 	return tx.Commit(ctx)
 }
 
-// AdminCreateBook เพิ่มหนังสือทีละเล่มพร้อมหมวดหมู่
-func (s *Store) AdminCreateBook(
-	ctx context.Context,
-	book *Book,
-	categoryIDs []string,
-) error {
+func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []string) error {
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
@@ -216,9 +212,7 @@ func (s *Store) AdminCreateBook(
 	defer tx.Rollback(ctx)
 
 	err = tx.QueryRow(ctx, `
-		INSERT INTO books (
-			title, author, description, cover_url, published_year
-		)
+		INSERT INTO books (title, author, description, cover_url, published_year)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id
 	`,
@@ -228,7 +222,6 @@ func (s *Store) AdminCreateBook(
 		book.CoverURL,
 		book.PublishedYear,
 	).Scan(&book.ID)
-
 	if err != nil {
 		return err
 	}
@@ -238,7 +231,6 @@ func (s *Store) AdminCreateBook(
 			INSERT INTO book_categories (book_id, category_id)
 			VALUES ($1, $2)
 		`, book.ID, categoryID)
-
 		if err != nil {
 			return err
 		}
@@ -253,7 +245,6 @@ func (s *Store) AdminCreateBook(
 		WHERE bc.book_id = $1
 		ORDER BY c.name
 	`, book.ID)
-
 	if err != nil {
 		return err
 	}
@@ -271,7 +262,6 @@ func (s *Store) AdminCreateBook(
 
 	err = rows.Err()
 	rows.Close()
-
 	if err != nil {
 		return err
 	}
@@ -279,18 +269,14 @@ func (s *Store) AdminCreateBook(
 	return tx.Commit(ctx)
 }
 
-func (s *Store) AdminUpdateBook(
-	ctx context.Context,
-	book *Book,
-	categoryIDs []string,
-) error {
+func (s *Store) AdminUpdateBook(ctx context.Context, book *Book, categoryIDs []string) error {
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 
-	result, err := tx.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		UPDATE books
 		SET title = $1,
 		    author = $2,
@@ -307,20 +293,14 @@ func (s *Store) AdminUpdateBook(
 		book.PublishedYear,
 		book.ID,
 	)
-
 	if err != nil {
 		return err
-	}
-
-	if result.RowsAffected() == 0 {
-		return ErrNotFound
 	}
 
 	_, err = tx.Exec(ctx, `
 		DELETE FROM book_categories
 		WHERE book_id = $1
 	`, book.ID)
-
 	if err != nil {
 		return err
 	}
@@ -330,7 +310,6 @@ func (s *Store) AdminUpdateBook(
 			INSERT INTO book_categories (book_id, category_id)
 			VALUES ($1, $2)
 		`, book.ID, categoryID)
-
 		if err != nil {
 			return err
 		}
@@ -345,7 +324,6 @@ func (s *Store) AdminUpdateBook(
 		WHERE bc.book_id = $1
 		ORDER BY c.name
 	`, book.ID)
-
 	if err != nil {
 		return err
 	}
@@ -363,7 +341,6 @@ func (s *Store) AdminUpdateBook(
 
 	err = rows.Err()
 	rows.Close()
-
 	if err != nil {
 		return err
 	}
@@ -376,7 +353,6 @@ func (s *Store) AdminDeleteBook(ctx context.Context, id string) error {
 		DELETE FROM books
 		WHERE id = $1
 	`, id)
-
 	if err != nil {
 		return err
 	}
@@ -388,24 +364,106 @@ func (s *Store) AdminDeleteBook(ctx context.Context, id string) error {
 	return nil
 }
 
-// AdminBulkBook คงไว้เพื่อรองรับโค้ดเดิมที่อาจอ้างถึง type นี้
 type AdminBulkBook struct {
 	Book        Book
 	CategoryIDs []string
 }
 
-// AdminBulkCreateBooks ปิดการเพิ่มหนังสือหลายเล่ม
 func (s *Store) AdminBulkCreateBooks(
 	ctx context.Context,
 	items []AdminBulkBook,
 	_ int,
 ) (int, int, error) {
-	return 0, len(items), errors.New(
-		"bulk book creation is disabled to preserve the current 88-book catalog",
-	)
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	added := 0
+	skipped := 0
+
+	for _, item := range items {
+		book := item.Book
+
+		book.Title = strings.TrimSpace(book.Title)
+		book.Author = strings.TrimSpace(book.Author)
+
+		if book.Title == "" || book.Author == "" {
+			skipped++
+			continue
+		}
+
+		var exists bool
+
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM books
+				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
+				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
+			)
+		`, book.Title, book.Author).Scan(&exists)
+
+		if err != nil {
+			return 0, 0, err
+		}
+
+		if exists {
+			skipped++
+			continue
+		}
+
+		err = tx.QueryRow(ctx, `
+			INSERT INTO books (
+				title,
+				author,
+				description,
+				cover_url,
+				published_year
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id
+		`,
+			book.Title,
+			book.Author,
+			book.Description,
+			book.CoverURL,
+			book.PublishedYear,
+		).Scan(&book.ID)
+
+		if err != nil {
+			return 0, 0, err
+		}
+
+		for _, categoryID := range item.CategoryIDs {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO book_categories (book_id, category_id)
+				VALUES ($1, $2)
+			`, book.ID, categoryID)
+
+			if err != nil {
+				return 0, 0, err
+			}
+		}
+
+		added++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, err
+	}
+
+	return added, skipped, nil
 }
 
-// BulkImportBook คงไว้เพื่อให้โค้ดเดิมที่อ้างถึง type นี้ยัง compile ได้
 type BulkImportBook struct {
 	Title         string
 	Author        string
@@ -416,7 +474,6 @@ type BulkImportBook struct {
 	Language      string
 }
 
-// BulkImportStats คงโครงสร้างผลลัพธ์เดิมไว้
 type BulkImportStats struct {
 	SkippedLimit            int `json:"limit_reached"`
 	SkippedNotThai          int `json:"not_thai"`
@@ -427,49 +484,401 @@ type BulkImportStats struct {
 	InsertedWithoutCategory int `json:"inserted_without_category"`
 }
 
-// AdminBulkImportBooks ปิดการนำเข้าหนังสือแบบกลุ่ม
 func (s *Store) AdminBulkImportBooks(
 	ctx context.Context,
 	books []BulkImportBook,
 ) (int, int, int, error) {
-	return 0, len(books), 0, errors.New(
-		"bulk import is disabled to preserve the current 88-book catalog",
-	)
+	inserted, skipped, total, _, err := s.AdminBulkImportBooksDetailed(ctx, books)
+	return inserted, skipped, total, err
 }
 
-// AdminBulkImportBooksDetailed ปิดการนำเข้าแบบกลุ่ม
 func (s *Store) AdminBulkImportBooksDetailed(
 	ctx context.Context,
 	books []BulkImportBook,
 ) (int, int, int, BulkImportStats, error) {
 	stats := BulkImportStats{}
 
-	return 0, len(books), 0, stats, errors.New(
-		"bulk import is disabled to preserve the current 88-book catalog",
-	)
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return 0, 0, 0, stats, err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE
+	`)
+	if err != nil {
+		return 0, 0, 0, stats, err
+	}
+
+	var total int
+	err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM books`).Scan(&total)
+	if err != nil {
+		return 0, 0, 0, stats, err
+	}
+
+	inserted := 0
+	skipped := 0
+
+	for _, candidate := range books {
+		book := candidate
+
+		book.Title = strings.TrimSpace(book.Title)
+		book.Author = strings.TrimSpace(book.Author)
+		book.Description = strings.TrimSpace(book.Description)
+		book.CoverURL = strings.TrimSpace(book.CoverURL)
+
+		if !strings.EqualFold(strings.TrimSpace(book.Language), "th") {
+			stats.SkippedNotThai++
+			skipped++
+			continue
+		}
+
+		if book.Title == "" || book.Author == "" || book.CoverURL == "" {
+			stats.SkippedMissingFields++
+			skipped++
+			continue
+		}
+
+		parsedURL, parseErr := url.ParseRequestURI(book.CoverURL)
+		if parseErr != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
+			stats.SkippedInvalidCover++
+			skipped++
+			continue
+		}
+
+		var exists bool
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM books
+				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
+				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
+			)
+		`, book.Title, book.Author).Scan(&exists)
+		if err != nil {
+			return 0, 0, 0, stats, err
+		}
+
+		if exists {
+			stats.SkippedDuplicate++
+			skipped++
+			continue
+		}
+
+		var bookID string
+		err = tx.QueryRow(ctx, `
+			INSERT INTO books (
+				title,
+				author,
+				description,
+				cover_url,
+				published_year
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id
+		`,
+			book.Title,
+			book.Author,
+			book.Description,
+			book.CoverURL,
+			book.PublishedYear,
+		).Scan(&bookID)
+		if err != nil {
+			return 0, 0, 0, stats, err
+		}
+
+		matchedCategories := 0
+		for _, categoryName := range book.Categories {
+			categoryName = strings.TrimSpace(categoryName)
+			if categoryName == "" {
+				continue
+			}
+
+			var categoryID string
+			err = tx.QueryRow(ctx, `
+				SELECT id
+				FROM categories
+				WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
+				LIMIT 1
+			`, categoryName).Scan(&categoryID)
+
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					stats.UnmatchedCategories++
+					continue
+				}
+				return 0, 0, 0, stats, err
+			}
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO book_categories (book_id, category_id)
+				VALUES ($1, $2)
+				ON CONFLICT DO NOTHING
+			`, bookID, categoryID)
+			if err != nil {
+				return 0, 0, 0, stats, err
+			}
+			matchedCategories++
+		}
+
+		if matchedCategories == 0 {
+			var otherCategoryID string
+			fallbackErr := tx.QueryRow(ctx, `
+				SELECT id
+				FROM categories
+				WHERE LOWER(BTRIM(name)) = 'other'
+				LIMIT 1
+			`).Scan(&otherCategoryID)
+
+			if fallbackErr == nil {
+				_, err = tx.Exec(ctx, `
+					INSERT INTO book_categories (book_id, category_id)
+					VALUES ($1, $2)
+					ON CONFLICT DO NOTHING
+				`, bookID, otherCategoryID)
+				if err != nil {
+					return 0, 0, 0, stats, err
+				}
+			} else if errors.Is(fallbackErr, pgx.ErrNoRows) {
+				stats.InsertedWithoutCategory++
+			} else {
+				return 0, 0, 0, stats, fallbackErr
+			}
+		}
+
+		inserted++
+		total++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, 0, stats, err
+	}
+
+	return inserted, skipped, total, stats, nil
 }
 
-// AdminReplaceNonThaiBooks ปิดการแทนที่หนังสือเดิมทั้งหมด
+// แทนที่หนังสือที่ไม่มีอักษรไทยจำนวน 85 รายการ
+// คง ID เดิมและข้อมูลตารางอื่นไว้ทั้งหมด
+// จะบันทึกก็ต่อเมื่อมีหนังสือไทยที่ผ่านการตรวจครบ 85 รายการเท่านั้น
 func (s *Store) AdminReplaceNonThaiBooks(
 	ctx context.Context,
 	books []BulkImportBook,
-) (
-	replaced, skipped, total, remaining int,
-	stats BulkImportStats,
-	err error,
-) {
-	return 0, len(books), 0, 0, stats, errors.New(
-		"book replacement is disabled to preserve the current 88-book catalog",
-	)
+) (replaced, skipped, total, remaining int, stats BulkImportStats, err error) {
+	const expectedTargets = 85
+
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return 0, 0, 0, 0, stats, err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `LOCK TABLE books IN SHARE ROW EXCLUSIVE MODE`)
+	if err != nil {
+		return 0, 0, 0, 0, stats, err
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT id
+		FROM books
+		WHERE COALESCE(title, '') !~ '[ก-๙]'
+		ORDER BY id
+		FOR UPDATE
+	`)
+	if err != nil {
+		return 0, 0, 0, 0, stats, err
+	}
+
+	targetIDs := make([]string, 0, expectedTargets)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, 0, 0, 0, stats, err
+		}
+		targetIDs = append(targetIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, 0, 0, 0, stats, err
+	}
+	rows.Close()
+
+	if len(targetIDs) != expectedTargets {
+		return 0, 0, 0, 0, stats, fmt.Errorf(
+			"replacement cancelled: expected %d non-Thai books, found %d; no data changed",
+			expectedTargets, len(targetIDs),
+		)
+	}
+
+	validBooks := make([]BulkImportBook, 0, expectedTargets)
+	seen := make(map[string]bool)
+
+	for _, candidate := range books {
+		book := candidate
+		book.Title = strings.TrimSpace(book.Title)
+		book.Author = strings.TrimSpace(book.Author)
+		book.Description = strings.TrimSpace(book.Description)
+		book.CoverURL = strings.TrimSpace(book.CoverURL)
+
+		if !strings.EqualFold(strings.TrimSpace(book.Language), "th") ||
+			!hasThaiScript(book.Title+" "+book.Description) {
+			stats.SkippedNotThai++
+			skipped++
+			continue
+		}
+
+		if book.Title == "" || book.Author == "" ||
+			book.Description == "" || book.CoverURL == "" {
+			stats.SkippedMissingFields++
+			skipped++
+			continue
+		}
+
+		parsedURL, parseErr := url.ParseRequestURI(book.CoverURL)
+		if parseErr != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
+			stats.SkippedInvalidCover++
+			skipped++
+			continue
+		}
+
+		key := strings.ToLower(
+			strings.Join(strings.Fields(book.Title), " ") + "|" +
+				strings.Join(strings.Fields(book.Author), " "),
+		)
+
+		if seen[key] {
+			stats.SkippedDuplicate++
+			skipped++
+			continue
+		}
+
+		var exists bool
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM books
+				WHERE LOWER(BTRIM(title)) = LOWER(BTRIM($1))
+				  AND LOWER(BTRIM(author)) = LOWER(BTRIM($2))
+				  AND id::text <> ALL($3::text[])
+			)
+		`, book.Title, book.Author, targetIDs).Scan(&exists)
+		if err != nil {
+			return 0, 0, 0, 0, stats, err
+		}
+
+		if exists {
+			stats.SkippedDuplicate++
+			skipped++
+			continue
+		}
+
+		seen[key] = true
+		validBooks = append(validBooks, book)
+	}
+
+	if len(validBooks) < expectedTargets {
+		return 0, skipped, 0, expectedTargets, stats, fmt.Errorf(
+			"replacement cancelled: only %d valid unique Thai books available; need %d; no data changed",
+			len(validBooks), expectedTargets,
+		)
+	}
+
+	for i := 0; i < expectedTargets; i++ {
+		book := validBooks[i]
+		bookID := targetIDs[i]
+
+		_, err = tx.Exec(ctx, `
+			UPDATE books
+			SET title = $1,
+			    author = $2,
+			    description = $3,
+			    cover_url = $4,
+			    published_year = $5,
+			    updated_at = NOW()
+			WHERE id = $6
+		`,
+			book.Title,
+			book.Author,
+			book.Description,
+			book.CoverURL,
+			book.PublishedYear,
+			bookID,
+		)
+		if err != nil {
+			return 0, 0, 0, 0, stats, err
+		}
+
+		_, err = tx.Exec(ctx, `
+			DELETE FROM book_categories
+			WHERE book_id = $1
+		`, bookID)
+		if err != nil {
+			return 0, 0, 0, 0, stats, err
+		}
+
+		matchedCategories := 0
+
+		for _, categoryName := range book.Categories {
+			categoryName = strings.TrimSpace(categoryName)
+			if categoryName == "" {
+				continue
+			}
+
+			var categoryID string
+			err = tx.QueryRow(ctx, `
+				SELECT id
+				FROM categories
+				WHERE LOWER(BTRIM(name)) = LOWER(BTRIM($1))
+				LIMIT 1
+			`, categoryName).Scan(&categoryID)
+
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					stats.UnmatchedCategories++
+					continue
+				}
+				return 0, 0, 0, 0, stats, err
+			}
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO book_categories (book_id, category_id)
+				VALUES ($1, $2)
+				ON CONFLICT DO NOTHING
+			`, bookID, categoryID)
+			if err != nil {
+				return 0, 0, 0, 0, stats, err
+			}
+
+			matchedCategories++
+		}
+
+		if matchedCategories == 0 {
+			stats.InsertedWithoutCategory++
+		}
+
+		replaced++
+	}
+
+	err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM books`).Scan(&total)
+	if err != nil {
+		return 0, 0, 0, 0, stats, err
+	}
+
+	remaining = expectedTargets - replaced
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, 0, 0, stats, err
+	}
+
+	return replaced, skipped, total, remaining, stats, nil
 }
 
-// hasThaiScript ตรวจสอบว่าข้อความมีอักษรภาษาไทยหรือไม่
 func hasThaiScript(value string) bool {
 	for _, r := range value {
 		if r >= '\u0E00' && r <= '\u0E7F' {
 			return true
 		}
 	}
-
 	return false
 }
