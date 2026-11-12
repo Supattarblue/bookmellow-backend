@@ -17,7 +17,7 @@ const (
 	googleBooksURL = "https://www.googleapis.com/books/v1/volumes"
 	bookTarget     = 100
 	minBookYear    = 2019
-	importPages    = 2
+	importPages    = 1
 	importPageSize = 40
 )
 
@@ -357,7 +357,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// จำกัดเวลารวมให้สั้นกว่าเวลาที่ Render มักตัดการเชื่อมต่อ
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
 
@@ -436,7 +435,6 @@ func (h *Handler) AdminBulkImportBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ใช้ ctx เดียวกัน เพื่อให้การบันทึกอยู่ภายใต้เวลาที่กำหนดด้วย
 	inserted, skipped, total, stats, err :=
 		h.Store.AdminBulkImportBooksDetailed(ctx, importBooks)
 
@@ -487,11 +485,10 @@ func (h *Handler) fetchGoogleBooksForImport(
 		}
 	}
 
-	// แต่ละคำขอเขียนผลลง index ของตัวเอง
 	pageResults := make([][]GoogleBookResult, len(tasks))
 
 	client := &http.Client{
-		Timeout: 8 * time.Second,
+		Timeout: 5 * time.Second,
 	}
 
 	var wg sync.WaitGroup
@@ -500,17 +497,23 @@ func (h *Handler) fetchGoogleBooksForImport(
 	successfulRequests := 0
 	var lastErr error
 
+	semaphore := make(chan struct{}, 2)
+
 	for i, task := range tasks {
 		if ctx.Err() != nil {
 			break
 		}
 
+		semaphore <- struct{}{}
 		wg.Add(1)
 
 		go func(index int, task searchTask) {
 			defer wg.Done()
+			defer func() {
+				<-semaphore
+			}()
 
-			requestCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
 			params := url.Values{}
@@ -530,6 +533,7 @@ func (h *Handler) fetchGoogleBooksForImport(
 				requestURL,
 				nil,
 			)
+
 			if err != nil {
 				mu.Lock()
 				lastErr = err
