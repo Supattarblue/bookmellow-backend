@@ -148,3 +148,14 @@ func (h *Handler) DeleteReview(w http.ResponseWriter, r *http.Request) {
 		"message": "Review deleted successfully",
 	})
 }
+func (h *Handler) AdminListAllReviews(w http.ResponseWriter, r *http.Request) {
+	reviews, err := h.Store.AdminListAllReviews(r.Context())
+	if err != nil {
+		internal(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": reviews,
+	})
+}

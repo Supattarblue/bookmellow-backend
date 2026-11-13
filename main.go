@@ -158,6 +158,10 @@ func run() error {
 	mux.Handle("GET /api/admin/dashboard",
 		adminOnly(http.HandlerFunc(h.AdminDashboard)),
 	)
+	// Admin reviews
+	mux.Handle("GET /api/admin/reviews",
+		adminOnly(http.HandlerFunc(h.AdminListAllReviews)),
+	)
 
 	// Admin members
 	mux.Handle("GET /api/admin/members",

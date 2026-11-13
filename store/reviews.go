@@ -143,3 +143,62 @@ func (s *Store) DeleteReview(ctx context.Context, reviewID, userID string) error
 
 	return nil
 }
+func (s *Store) AdminListAllReviews(ctx context.Context) ([]AdminReview, error) {
+	rows, err := s.DB.Query(ctx, `
+		SELECT
+			r.id,
+			r.user_id,
+			u.username,
+			r.book_id,
+			b.title,
+			r.rating,
+			COALESCE(r.comment, ''),
+			r.created_at::text,
+			r.updated_at::text
+		FROM reviews r
+		JOIN users u ON u.id = r.user_id
+		JOIN books b ON b.id = r.book_id
+		ORDER BY r.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	reviews := make([]AdminReview, 0)
+
+	for rows.Next() {
+		var review AdminReview
+
+		err := rows.Scan(
+			&review.ID,
+			&review.UserID,
+			&review.Username,
+			&review.BookID,
+			&review.BookTitle,
+			&review.Rating,
+			&review.Comment,
+			&review.CreatedAt,
+			&review.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		reviews = append(reviews, review)
+	}
+
+	return reviews, rows.Err()
+}
+
+type AdminReview struct {
+	ID        string `json:"id"`
+	UserID    string `json:"user_id"`
+	Username  string `json:"username"`
+	BookID    string `json:"book_id"`
+	BookTitle string `json:"book_title"`
+	Rating    int    `json:"rating"`
+	Comment   string `json:"comment"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
