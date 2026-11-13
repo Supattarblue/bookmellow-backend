@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// CreatePasswordResetToken สร้าง Token ใหม่และยกเลิก Token เก่าที่ยังใช้ได้
+// CreatePasswordResetToken สร้าง Token ใหม่และยกเลิก Token เก่า
 func (s *Store) CreatePasswordResetToken(
 	ctx context.Context,
 	userID string,
@@ -44,7 +44,7 @@ func (s *Store) CreatePasswordResetToken(
 	return tx.Commit(ctx)
 }
 
-// ResetPassword ตรวจสอบ Token และเปลี่ยนรหัสผ่านแบบใช้ครั้งเดียว
+// ResetPassword เปลี่ยนรหัสผ่านด้วย Token
 func (s *Store) ResetPassword(
 	ctx context.Context,
 	tokenHash string,
@@ -84,4 +84,26 @@ func (s *Store) ResetPassword(
 	}
 
 	return tx.Commit(ctx)
+}
+
+// UpdatePasswordByUserID เปลี่ยนรหัสผ่านของสมาชิก
+func (s *Store) UpdatePasswordByUserID(
+	ctx context.Context,
+	userID string,
+	newPasswordHash string,
+) error {
+	commandTag, err := s.DB.Exec(ctx, `
+		UPDATE users
+		SET password_hash = $1
+		WHERE id = $2
+	`, newPasswordHash, userID)
+	if err != nil {
+		return err
+	}
+
+	if commandTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	return nil
 }

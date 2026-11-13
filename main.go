@@ -92,8 +92,8 @@ func run() error {
 	mux.HandleFunc("POST /api/auth/login", h.Login)
 
 	// Forgot password and reset password
-	mux.HandleFunc("POST /api/auth/forgot-password", h.ForgotPassword)
-	mux.HandleFunc("POST /api/auth/reset-password", h.ResetPassword)
+	mux.HandleFunc("POST /api/auth/forgot-password", h.ForgotPasswordDirect)
+	
 
 	mux.Handle("GET /api/auth/me",
 		mw.RequireLogin(issuer, http.HandlerFunc(h.Me)),
