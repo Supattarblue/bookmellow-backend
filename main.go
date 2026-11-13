@@ -90,6 +90,11 @@ func run() error {
 	// Authentication
 	mux.HandleFunc("POST /api/auth/register", h.Register)
 	mux.HandleFunc("POST /api/auth/login", h.Login)
+
+	// Forgot password and reset password
+	mux.HandleFunc("POST /api/auth/forgot-password", h.ForgotPassword)
+	mux.HandleFunc("POST /api/auth/reset-password", h.ResetPassword)
+
 	mux.Handle("GET /api/auth/me",
 		mw.RequireLogin(issuer, http.HandlerFunc(h.Me)),
 	)
@@ -158,6 +163,7 @@ func run() error {
 	mux.Handle("GET /api/admin/dashboard",
 		adminOnly(http.HandlerFunc(h.AdminDashboard)),
 	)
+
 	// Admin reviews
 	mux.Handle("GET /api/admin/reviews",
 		adminOnly(http.HandlerFunc(h.AdminListAllReviews)),
