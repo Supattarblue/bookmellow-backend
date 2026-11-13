@@ -10,8 +10,7 @@ import (
 )
 
 const (
-	BookCatalogTarget = 100
-	MinimumBookYear   = 2019
+	MinimumBookYear = 2019
 )
 
 type AdminStats struct {
@@ -198,19 +197,6 @@ func (s *Store) AdminCreateBook(ctx context.Context, book *Book, categoryIDs []s
 		return err
 	}
 
-	var visible int
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM book_catalog_visibility
-		WHERE is_visible = TRUE
-	`).Scan(&visible)
-	if err != nil {
-		return err
-	}
-
-	if visible >= BookCatalogTarget {
-		return errors.New("book catalog has reached the 100-book limit")
-	}
-
 	err = tx.QueryRow(ctx, `
 		INSERT INTO books (title, author, description, cover_url, published_year)
 		VALUES ($1, $2, $3, $4, $5)
@@ -385,28 +371,9 @@ func (s *Store) AdminBulkCreateBooks(
 		return 0, 0, err
 	}
 
-	var visible int
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM book_catalog_visibility
-		WHERE is_visible = TRUE
-	`).Scan(&visible)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	remaining := BookCatalogTarget - visible
-	if remaining <= 0 {
-		return 0, len(items), nil
-	}
-
 	added, skipped := 0, 0
 
 	for _, item := range items {
-		if added >= remaining {
-			skipped++
-			continue
-		}
-
 		book := item.Book
 		book.Title = strings.TrimSpace(book.Title)
 		book.Author = strings.TrimSpace(book.Author)
@@ -528,7 +495,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		return 0, 0, 0, stats, err
 	}
 
-	var total, visible int
+	var total int
 
 	err = tx.QueryRow(ctx, `
 		SELECT COUNT(*) FROM books
@@ -537,29 +504,7 @@ func (s *Store) AdminBulkImportBooksDetailed(
 		return 0, 0, 0, stats, err
 	}
 
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM book_catalog_visibility
-		WHERE is_visible = TRUE
-	`).Scan(&visible)
-	if err != nil {
-		return 0, 0, 0, stats, err
-	}
-
-	remaining := BookCatalogTarget - visible
-
-	if remaining <= 0 {
-		stats.SkippedLimit = len(books)
-
-		if err := tx.Commit(ctx); err != nil {
-			return 0, 0, 0, stats, err
-		}
-
-		return 0, len(books), total, stats, nil
-	}
-
 	inserted, skipped := 0, 0
-	categoryCounts := make(map[string]int)
 
 	allowedLanguages := map[string]bool{
 		"th": true,
@@ -569,12 +514,6 @@ func (s *Store) AdminBulkImportBooksDetailed(
 	}
 
 	for _, candidate := range books {
-		if inserted >= remaining {
-			stats.SkippedLimit++
-			skipped++
-			continue
-		}
-
 		book := candidate
 
 		book.Title = strings.TrimSpace(book.Title)
@@ -646,31 +585,6 @@ func (s *Store) AdminBulkImportBooksDetailed(
 			return 0, 0, 0, stats, err
 		}
 
-		currentCount, loaded := categoryCounts[categoryID]
-
-		if !loaded {
-			err = tx.QueryRow(ctx, `
-				SELECT COUNT(DISTINCT bc.book_id)
-				FROM book_categories bc
-				INNER JOIN book_catalog_visibility v
-					ON v.book_id = bc.book_id
-				WHERE bc.category_id = $1
-				  AND v.is_visible = TRUE
-			`, categoryID).Scan(&currentCount)
-
-			if err != nil {
-				return 0, 0, 0, stats, err
-			}
-
-			categoryCounts[categoryID] = currentCount
-		}
-
-		if currentCount >= 5 {
-			stats.SkippedCategoryLimit++
-			skipped++
-			continue
-		}
-
 		var exists bool
 
 		err = tx.QueryRow(ctx, `
@@ -739,9 +653,6 @@ func (s *Store) AdminBulkImportBooksDetailed(
 
 		inserted++
 		total++
-		visible++
-
-		categoryCounts[categoryID]++
 		stats.InsertedByCategory[categoryName]++
 	}
 
