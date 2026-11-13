@@ -1,13 +1,16 @@
 package handler
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"net/smtp"
 	"net/url"
 	"os"
 	"strings"
@@ -83,7 +86,7 @@ func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 
 	resetLink := frontendURL + "/reset-password?token=" + url.QueryEscape(rawToken)
 
-	if err := sendPasswordResetEmail(email, resetLink); err != nil {
+	if err := sendPasswordResetEmail(r.Context(), email, resetLink); err != nil {
 		log.Printf("Password reset email could not be sent: %v", err)
 
 		writeJSON(w, http.StatusOK, map[string]string{
@@ -145,47 +148,72 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func sendPasswordResetEmail(to, resetLink string) error {
-	gmailUser := os.Getenv("GMAIL_USER")
-	gmailAppPassword := os.Getenv("GMAIL_APP_PASSWORD")
+// sendPasswordResetEmail sends an email using the Resend HTTPS API.
+func sendPasswordResetEmail(ctx context.Context, to, resetLink string) error {
+	apiKey := os.Getenv("RESEND_API_KEY")
+	fromEmail := os.Getenv("RESEND_FROM_EMAIL")
 
-	if gmailUser == "" || gmailAppPassword == "" {
-		return fmt.Errorf("GMAIL_USER or GMAIL_APP_PASSWORD is not configured")
+	if apiKey == "" {
+		return fmt.Errorf("RESEND_API_KEY is not configured")
 	}
 
-	auth := smtp.PlainAuth(
-		"",
-		gmailUser,
-		gmailAppPassword,
-		"smtp.gmail.com",
-	)
+	if fromEmail == "" {
+		return fmt.Errorf("RESEND_FROM_EMAIL is not configured")
+	}
 
-	subject := "BookMellow - Password Reset"
-	body := fmt.Sprintf(
-		"Hello,\n\n"+
-			"We received a request to reset your BookMellow password.\n\n"+
-			"Open the link below to create a new password:\n%s\n\n"+
-			"This link expires in 15 minutes and can only be used once.\n\n"+
-			"If you did not request this, you can ignore this email.\n\n"+
-			"BookMellow Team",
-		resetLink,
-	)
+	payload := map[string]interface{}{
+		"from": fromEmail,
+		"to": []string{
+			to,
+		},
+		"subject": "BookMellow - Password Reset",
+		"text": fmt.Sprintf(
+			"Hello,\n\n"+
+				"We received a request to reset your BookMellow password.\n\n"+
+				"Open the link below to create a new password:\n%s\n\n"+
+				"This link expires in 15 minutes and can only be used once.\n\n"+
+				"If you did not request this, you can ignore this email.\n\n"+
+				"BookMellow Team",
+			resetLink,
+		),
+	}
 
-	message := []byte(
-		"From: BookMellow <" + gmailUser + ">\r\n" +
-			"To: " + to + "\r\n" +
-			"Subject: " + subject + "\r\n" +
-			"MIME-Version: 1.0\r\n" +
-			"Content-Type: text/plain; charset=UTF-8\r\n" +
-			"\r\n" +
-			body,
-	)
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("could not encode email request: %w", err)
+	}
 
-	return smtp.SendMail(
-		"smtp.gmail.com:587",
-		auth,
-		gmailUser,
-		[]string{to},
-		message,
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"https://api.resend.com/emails",
+		bytes.NewBuffer(jsonBody),
 	)
+	if err != nil {
+		return fmt.Errorf("could not create Resend request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("Resend API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf(
+			"Resend API returned status %d: %s",
+			resp.StatusCode,
+			string(responseBody),
+		)
+	}
+
+	return nil
 }
